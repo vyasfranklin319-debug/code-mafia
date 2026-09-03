@@ -1,14 +1,37 @@
 # Dependencies
-node_modules
-.pnpm-store
+node_modules/
+*/node_modules/
 
-# Production build
-dist
-build
+# Build output
+dist/
+*/dist/
+build/
 
-# Environment & IDE
+# Environment files
 .env
 .env.local
-.vscode
-.idea
+.env.production
+*.env
+**/serviceAccountKey.json
+
+# Firebase
+firebase-debug.log
+.firebase/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
 *.log
+npm-debug.log*
+
+# Scratch/test files
+scratch/
+*/scratch/
