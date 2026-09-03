@@ -56,6 +56,10 @@ export class GameRoom {
   async webSocketMessage(ws, message) {
     try {
       const data = JSON.parse(message);
+      if (data && data.event === 'PING') {
+        ws.send(JSON.stringify({ event: 'PONG', payload: { timestamp: Date.now() } }));
+        return;
+      }
       // Broadcast to all other clients in the room
       this.broadcast(ws, data);
     } catch (e) {

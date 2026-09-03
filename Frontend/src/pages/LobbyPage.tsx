@@ -6,7 +6,6 @@ interface LobbyPageProps {
   session: GameSession;
   currentUser: Player;
   onToggleReady: () => void;
-  onAddBotPlayer: () => void;
   onStartGame: () => void;
 }
 
@@ -14,7 +13,6 @@ export const LobbyPage: React.FC<LobbyPageProps> = ({
   session,
   currentUser,
   onToggleReady,
-  onAddBotPlayer,
   onStartGame
 }) => {
   const [chatInput, setChatInput] = useState('');
@@ -190,20 +188,31 @@ export const LobbyPage: React.FC<LobbyPageProps> = ({
             </div>
           );
         })}
-      </div>
-
-      {/* Host Action Controls */}
-      {isHost && session.players.length < session.config.playerCount && (
-        <div className="flex justify-end pt-1">
-          <button
-            onClick={onAddBotPlayer}
-            className="px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-purple-300 font-bold text-xs transition-colors uppercase flex items-center gap-2"
+        {/* Waiting Open Slots for Live Players */}
+        {Array.from({ length: Math.max(0, session.config.playerCount - session.players.length) }).map((_, idx) => (
+          <div
+            key={`open-slot-${idx}`}
+            className="p-4 rounded-2xl border border-dashed border-purple-500/20 bg-purple-950/10 flex items-center justify-between"
           >
-            <UserPlus className="w-4 h-4 text-purple-400" />
-            <span>Add AI Operative Slot</span>
-          </button>
-        </div>
-      )}
+            <div className="flex items-center space-x-4">
+              <div className="w-11 h-11 rounded-2xl border border-dashed border-purple-500/30 flex items-center justify-center text-purple-400/50 font-mono font-bold text-xs">
+                {session.players.length + idx + 1}
+              </div>
+              <div className="space-y-0.5">
+                <span className="text-slate-400 font-bold text-xs tracking-wider block">
+                  WAITING FOR OPERATIVE...
+                </span>
+                <span className="text-[10px] text-purple-400/70 font-mono block">
+                  JOIN VIA ROOM PIN: <span className="font-bold text-purple-300">#{session.joinCode}</span>
+                </span>
+              </div>
+            </div>
+            <span className="text-[9px] font-bold text-purple-400/80 uppercase tracking-widest px-2.5 py-1 rounded-full bg-purple-900/30 border border-purple-500/30">
+              OPEN SLOT
+            </span>
+          </div>
+        ))}
+      </div>
 
       {/* 3. LOBBY CHAT STREAM */}
       <div className="gaming-card p-6 space-y-4">

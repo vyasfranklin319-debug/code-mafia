@@ -80,6 +80,26 @@ export async function getUserProfileFromFirestore(userId: string): Promise<UserP
 }
 
 /**
+ * FETCH ALL OPERATIVES FROM FIRESTORE
+ */
+export async function fetchOnlineUsersFromFirestore(): Promise<UserProfileData[]> {
+  try {
+    const querySnapshot = await getDocs(collection(db, 'users'));
+    const userList: UserProfileData[] = [];
+    querySnapshot.forEach((docSnap) => {
+      const data = docSnap.data() as UserProfileData;
+      if (data && data.username) {
+        userList.push(data);
+      }
+    });
+    return userList;
+  } catch (e: any) {
+    console.warn('[Cloud Firestore Users Fetch Fallback]:', e.message);
+    return [];
+  }
+}
+
+/**
  * 2. LIVE GAME SESSION STORAGE (Firestore Collection: 'sessions')
  * Persists room phase, current round, join code, and full player roster in real-time
  */

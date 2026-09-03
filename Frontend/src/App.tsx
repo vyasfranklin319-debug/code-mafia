@@ -37,32 +37,37 @@ export const App: React.FC = () => {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [currentPhase, setCurrentPhase] = useState<Phase>('LOGIN');
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
-  // Initialize default session once on mount so NEXUS ARENA views render instantly with a STABLE room code
+  // Initialize session state — restored from sessionStorage only if an active match is in progress
   const [session, setSession] = useState<GameSession | null>(() => {
     try {
       const savedSession = sessionStorage.getItem('code_mafia_active_session');
       if (savedSession) {
-        return JSON.parse(savedSession);
+        const parsed = JSON.parse(savedSession);
+        if (parsed && parsed.phase && parsed.phase !== 'LOGIN' && parsed.phase !== 'DASHBOARD') {
+          return parsed;
+        }
       }
     } catch (e) {}
-
-    const initialConfig: GameConfig = {
-      packId: 'task-master-js',
-      playerCount: 6,
-      mafiaCount: 2,
-      workRoundSeconds: 180,
-      discussionSeconds: 90,
-      votingSeconds: 45,
-      transparencyLevel: 'FULL',
-      tieRule: 'NO_ELIMINATION',
-      passRateThreshold: 100,
-      maxRounds: 3
-    };
-    return createInitialSession(initialConfig, 'OperativeAlpha');
+    return null;
   });
 
   const [currentUser, setCurrentUser] = useState<Player | null>(() => {
-    return session?.players?.[0] || null;
+    try {
+      const savedUser = localStorage.getItem('code_mafia_active_user');
+      if (savedUser) {
+        return {
+          id: `usr-${Date.now()}`,
+          displayName: savedUser,
+          isAlive: true,
+          isHost: false,
+          isBot: false,
+          isReady: false,
+          avatarColor: 'bg-purple-600',
+          stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+        };
+      }
+    } catch (e) {}
+    return null;
   });
 
   // Persist session to sessionStorage to maintain stable room code across renders and refreshes
@@ -71,16 +76,57 @@ export const App: React.FC = () => {
       try {
         sessionStorage.setItem('code_mafia_active_session', JSON.stringify(session));
       } catch (e) {}
+    } else {
+      sessionStorage.removeItem('code_mafia_active_session');
     }
   }, [session?.id, session?.joinCode]);
+
   const [isTestRunning, setIsTestRunning] = useState(false);
   const [isNextEditShadow, setIsNextEditShadow] = useState(false);
 
   // Initialize socket listener for real-time multiplayer
   useEffect(() => {
     if (!session || !currentUser) return;
+    const channelKey = (session.joinCode || session.id).toUpperCase();
 
-    initSocketConnection(session.id, currentUser, (event, data) => {
+    initSocketConnection(channelKey, currentUser, (event, data) => {
+      if (event === 'PLAYER_JOINED') {
+        if (data && data.player) {
+          setSession(prev => {
+            if (!prev) return null;
+            const exists = prev.players.some(p => p.id === data.player.id || p.displayName === data.player.displayName);
+            if (exists) return prev;
+            return { ...prev, players: [...prev.players, data.player] };
+          });
+        }
+      }
+
+      if (event === 'PLAYER_READY_TOGGLED') {
+        if (data && data.playerId) {
+          setSession(prev => {
+            if (!prev) return null;
+            const updated = prev.players.map(p =>
+              p.id === data.playerId ? { ...p, isReady: data.isReady } : p
+            );
+            return { ...prev, players: updated };
+          });
+        }
+      }
+
+      if (event === 'GAME_STARTED') {
+        if (data && data.session) {
+          setSession(data.session);
+          setCurrentPhase('ROLE_REVEAL');
+        }
+      }
+
+      if (event === 'PHASE_ADVANCED') {
+        if (data && data.phase) {
+          setCurrentPhase(data.phase);
+          if (data.session) setSession(data.session);
+        }
+      }
+
       if (event === 'CODE_UPDATED') {
         setSession(prev => {
           if (!prev) return null;
@@ -116,25 +162,17 @@ export const App: React.FC = () => {
     });
 
     return () => disconnectSocket();
-  }, [session?.id, currentUser?.id]);
+  }, [session?.id, session?.joinCode, currentUser?.id]);
 
-  // Realtime Cloud Firestore Session Synchronization
+  // Realtime Cloud Firestore Stream Listener (Without re-sync write loop)
   useEffect(() => {
-    if (session) {
-      syncSessionToFirestore(session);
-    }
-  }, [session?.phase, session?.currentRound, session?.players, session?.winner]);
-
-  // Realtime Cloud Firestore Stream Listener
-  useEffect(() => {
-    const activeKey = session?.joinCode || session?.id;
+    const activeKey = (session?.joinCode || session?.id)?.toUpperCase();
     if (!activeKey) return;
 
     const unsubscribe = listenToFirestoreSession(activeKey, (firestoreData) => {
       if (firestoreData) {
         setSession(prev => {
           if (!prev) return prev;
-          // IMMUTABLE JOIN CODE LOCK: Never allow joinCode to change once established
           let updated = { ...prev, joinCode: prev.joinCode };
           let changed = false;
 
@@ -145,11 +183,13 @@ export const App: React.FC = () => {
           }
 
           if (firestoreData.players && Array.isArray(firestoreData.players)) {
-            const mergedPlayers = firestoreData.players.map((fp: any) => {
-              const isThisHost = fp.isHost || fp.displayName === firestoreData.hostName;
-              const baseObj = { ...fp, isHost: isThisHost };
+            // Filter out any dummy bots and sanitize
+            const livePlayers = firestoreData.players.filter((p: any) => !p.isBot);
+            const mergedPlayers = livePlayers.map((fp: any) => {
+              const isThisHost = fp.isHost || fp.displayName === (firestoreData.hostName || livePlayers[0]?.displayName);
+              const baseObj = { ...fp, isHost: isThisHost, isBot: false };
               if (currentUser && fp.displayName === currentUser.displayName) {
-                return { ...baseObj, isHost: isThisHost, isReady: fp.isReady ?? currentUser.isReady };
+                return { ...baseObj, isReady: fp.isReady ?? currentUser.isReady };
               }
               return baseObj;
             });
@@ -174,12 +214,12 @@ export const App: React.FC = () => {
     return () => unsubscribe();
   }, [session?.id, session?.joinCode, currentUser?.displayName]);
 
-  // Handler: Create Game
+  // Handler: Create Game (Mode 1: Launch Arena Match)
   const handleCreateGame = async (config: GameConfig, hostName: string) => {
     const effectiveHost = hostName.trim() || currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
     localStorage.setItem('code_mafia_active_user', effectiveHost);
 
-    // Pre-generate a SINGLE STABLE PIN code so it NEVER changes
+    // Pre-generate a 6-character stable PIN
     const stableJoinCode = Math.random().toString(36).substring(2, 8).toUpperCase();
 
     try {
@@ -190,41 +230,52 @@ export const App: React.FC = () => {
         mafiaCount: config.mafiaCount
       });
 
-      const chosenCode = (apiRes && apiRes.joinCode) ? apiRes.joinCode : stableJoinCode;
+      const chosenCode = (apiRes && apiRes.joinCode) ? apiRes.joinCode.toUpperCase() : stableJoinCode;
       const newSession = createInitialSession(config, effectiveHost, chosenCode);
       if (apiRes && apiRes.sessionId) newSession.id = apiRes.sessionId;
 
       newSession.hostName = effectiveHost;
-      if (newSession.players && newSession.players.length > 0) {
-        newSession.players[0].displayName = effectiveHost;
-        newSession.players[0].isHost = true;
-      }
-
-      const hostPlayer = newSession.players[0];
+      const hostPlayer: Player = {
+        id: `usr-${Date.now()}`,
+        displayName: effectiveHost,
+        isAlive: true,
+        isHost: true,
+        isBot: false,
+        isReady: true,
+        avatarColor: 'bg-purple-600',
+        stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+      };
+      newSession.players = [hostPlayer];
 
       setSession(newSession);
       setCurrentUser(hostPlayer);
       setCurrentPhase('LOBBY');
-      syncSessionToFirestore(newSession);
+      await syncSessionToFirestore(newSession);
     } catch (e) {
       const newSession = createInitialSession(config, effectiveHost, stableJoinCode);
       newSession.hostName = effectiveHost;
-      if (newSession.players && newSession.players.length > 0) {
-        newSession.players[0].displayName = effectiveHost;
-        newSession.players[0].isHost = true;
-      }
-      const hostPlayer = newSession.players[0];
+      const hostPlayer: Player = {
+        id: `usr-${Date.now()}`,
+        displayName: effectiveHost,
+        isAlive: true,
+        isHost: true,
+        isBot: false,
+        isReady: true,
+        avatarColor: 'bg-purple-600',
+        stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+      };
+      newSession.players = [hostPlayer];
 
       setSession(newSession);
       setCurrentUser(hostPlayer);
       setCurrentPhase('LOBBY');
-      syncSessionToFirestore(newSession);
+      await syncSessionToFirestore(newSession);
     }
   };
 
-  // Handler: Join Room by PIN / Code
+  // Handler: Join Room by PIN / Code (Mode 2: Enter Room Pin / Join Code)
   const handleJoinByPin = async (pinCode: string) => {
-    const activeUserName = currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'JoiningOperative';
+    const activeUserName = currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
     const cleanPin = pinCode.trim().toUpperCase();
 
     const joiningPlayer: Player = {
@@ -245,11 +296,18 @@ export const App: React.FC = () => {
       let targetSession: GameSession;
 
       if (firestoreDoc) {
-        const existingPlayers = Array.isArray(firestoreDoc.players) ? firestoreDoc.players : [];
-        const exists = existingPlayers.some((p: any) => p.displayName === activeUserName);
-        const updatedPlayers = exists ? existingPlayers : [...existingPlayers, joiningPlayer];
+        // Filter out any stale dummy bots
+        const existingPlayers: Player[] = (Array.isArray(firestoreDoc.players) ? firestoreDoc.players : [])
+          .filter((p: any) => !p.isBot);
 
-        const defaultConfig: GameConfig = {
+        const exists = existingPlayers.some((p: any) => p.displayName === activeUserName);
+        const hostName = firestoreDoc.hostName || existingPlayers.find((p: any) => p.isHost)?.displayName || (existingPlayers[0] ? existingPlayers[0].displayName : activeUserName);
+
+        const updatedPlayers = exists
+          ? existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName }))
+          : [...existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName })), joiningPlayer];
+
+        const matchConfig: GameConfig = firestoreDoc.config || {
           packId: 'task-master-js',
           playerCount: 6,
           mafiaCount: 2,
@@ -262,12 +320,13 @@ export const App: React.FC = () => {
           maxRounds: 3
         };
 
-        const base = createInitialSession(defaultConfig, firestoreDoc.hostName || 'HostOperative');
+        const base = createInitialSession(matchConfig, hostName, cleanPin);
         targetSession = {
           ...base,
           id: firestoreDoc.id || cleanPin,
-          joinCode: firestoreDoc.joinCode || cleanPin,
+          joinCode: cleanPin,
           phase: firestoreDoc.phase || 'LOBBY',
+          hostName,
           players: updatedPlayers
         };
       } else {
@@ -283,8 +342,10 @@ export const App: React.FC = () => {
           passRateThreshold: 100,
           maxRounds: 3
         };
-        targetSession = createInitialSession(defaultConfig, activeUserName);
+        targetSession = createInitialSession(defaultConfig, activeUserName, cleanPin);
         targetSession.joinCode = cleanPin;
+        targetSession.hostName = activeUserName;
+        joiningPlayer.isHost = true;
         targetSession.players = [joiningPlayer];
       }
 
@@ -292,14 +353,21 @@ export const App: React.FC = () => {
       setCurrentUser(joiningPlayer);
       setCurrentPhase('LOBBY');
 
-      // Sync updated room with new player immediately to Cloud Firestore
+      // Sync updated room with new live player to Cloud Firestore
       await syncSessionToFirestore(targetSession);
+
+      // Broadcast player join across WebSocket Durable Object
+      emitMultiplayerEvent('PLAYER_JOINED', {
+        roomId: cleanPin,
+        player: joiningPlayer,
+        sessionData: targetSession
+      });
     } catch (e) {
       console.warn('[Join PIN Error]:', e);
     }
   };
 
-  // Handler: Quick Match — Global Matchmaking Scanner
+  // Handler: Quick Match — Global Matchmaking Scanner (Mode 3: Quick Match - Find Game)
   const handleQuickMatch = async () => {
     const activeUserName = currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
 
@@ -308,119 +376,74 @@ export const App: React.FC = () => {
       const { findGlobalOpenSessionFromFirestore } = await import('./services/firebaseStore');
       const openRoom = await findGlobalOpenSessionFromFirestore();
 
-      if (openRoom && openRoom.id && openRoom.joinCode) {
-        // Found an open room! Join it via PIN
-        console.log(`[Quick Match] Found open room: ${openRoom.joinCode} (${openRoom.playersCount}/${6} players)`);
-        handleJoinByPin(openRoom.joinCode);
+      if (openRoom && openRoom.joinCode) {
+        console.log(`[Quick Match] Found open room: ${openRoom.joinCode} (${openRoom.playersCount || openRoom.players?.length || 1}/6 players)`);
+        await handleJoinByPin(openRoom.joinCode);
         return;
       }
     } catch (e) {
       console.warn('[Quick Match] Firestore scan fallback:', e);
     }
 
-    // 2. No open rooms found — Create a new global room and wait for players
-    console.log('[Quick Match] No open rooms found. Creating new global room...');
-    try {
-      const apiRes = await apiCreateSession({
-        hostName: activeUserName,
-        packId: 'task-master-js',
-        playerCount: 6,
-        mafiaCount: 2
-      });
-
-      const defaultConfig: GameConfig = {
-        packId: 'task-master-js',
-        playerCount: 6,
-        mafiaCount: 2,
-        workRoundSeconds: 180,
-        discussionSeconds: 90,
-        votingSeconds: 45,
-        transparencyLevel: 'FULL',
-        tieRule: 'NO_ELIMINATION',
-        passRateThreshold: 100,
-        maxRounds: 3
-      };
-
-      const newSession = createInitialSession(defaultConfig, activeUserName);
-      if (apiRes && apiRes.sessionId) newSession.id = apiRes.sessionId;
-      if (apiRes && apiRes.joinCode) newSession.joinCode = apiRes.joinCode;
-      newSession.hostName = activeUserName;
-      if (newSession.players && newSession.players.length > 0) {
-        newSession.players[0].displayName = activeUserName;
-        newSession.players[0].isHost = true;
-      }
-      const hostPlayer = newSession.players[0];
-
-      setSession(newSession);
-      setCurrentUser(hostPlayer);
-      setCurrentPhase('LOBBY');
-      syncSessionToFirestore(newSession);
-    } catch (e) {
-      // Fallback: Create local session
-      const defaultConfig: GameConfig = {
-        packId: 'task-master-js',
-        playerCount: 6,
-        mafiaCount: 2,
-        workRoundSeconds: 180,
-        discussionSeconds: 90,
-        votingSeconds: 45,
-        transparencyLevel: 'FULL',
-        tieRule: 'NO_ELIMINATION',
-        passRateThreshold: 100,
-        maxRounds: 3
-      };
-
-      const newSession = createInitialSession(defaultConfig, activeUserName);
-      newSession.hostName = activeUserName;
-      if (newSession.players && newSession.players.length > 0) {
-        newSession.players[0].displayName = activeUserName;
-        newSession.players[0].isHost = true;
-      }
-      const hostPlayer = newSession.players[0];
-
-      setSession(newSession);
-      setCurrentUser(hostPlayer);
-      setCurrentPhase('LOBBY');
-      syncSessionToFirestore(newSession);
-    }
+    // 2. No open rooms found — Create a new global arena room and wait for live players
+    console.log('[Quick Match] No open rooms found. Creating new arena room...');
+    const defaultConfig: GameConfig = {
+      packId: 'task-master-js',
+      playerCount: 6,
+      mafiaCount: 2,
+      workRoundSeconds: 180,
+      discussionSeconds: 90,
+      votingSeconds: 45,
+      transparencyLevel: 'FULL',
+      tieRule: 'NO_ELIMINATION',
+      passRateThreshold: 100,
+      maxRounds: 3
+    };
+    await handleCreateGame(defaultConfig, activeUserName);
   };
 
   // Handler: Ready Up
-  const handleToggleReady = () => {
+  const handleToggleReady = async () => {
     if (!session || !currentUser) return;
+    const newReady = !currentUser.isReady;
     const updatedPlayers = session.players.map(p =>
-      p.id === currentUser.id ? { ...p, isReady: !p.isReady } : p
+      p.displayName === currentUser.displayName || p.id === currentUser.id ? { ...p, isReady: newReady } : p
     );
-    const updatedUser = { ...currentUser, isReady: !currentUser.isReady };
-    setSession({ ...session, players: updatedPlayers });
-    setCurrentUser(updatedUser);
-  };
+    const updatedUser = { ...currentUser, isReady: newReady };
+    const updatedSession = { ...session, players: updatedPlayers };
 
-  // Handler: Add Bot Player
-  const handleAddBotPlayer = () => {
-    if (!session) return;
-    const count = session.players.length;
-    const newBot = generateBotPlayers(1, count + 1)[0];
-    const updatedPlayers = [...session.players, newBot];
-    setSession({ ...session, players: updatedPlayers });
+    setSession(updatedSession);
+    setCurrentUser(updatedUser);
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    emitMultiplayerEvent('PLAYER_READY_TOGGLED', { roomId: channelKey, playerId: currentUser.id, isReady: newReady });
+    await syncSessionToFirestore(updatedSession);
   };
 
   // Handler: Start Game
-  const handleStartGame = () => {
+  const handleStartGame = async () => {
     if (!session) return;
     const sessionWithRoles = assignRoles(session);
     setSession(sessionWithRoles);
-    const updatedMe = sessionWithRoles.players.find(p => p.id === currentUser?.id) || currentUser;
+    const updatedMe = sessionWithRoles.players.find(p => p.id === currentUser?.id || p.displayName === currentUser?.displayName) || currentUser;
     setCurrentUser(updatedMe);
     setCurrentPhase('ROLE_REVEAL');
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    emitMultiplayerEvent('GAME_STARTED', { roomId: channelKey, phase: 'ROLE_REVEAL', session: sessionWithRoles });
+    await syncSessionToFirestore(sessionWithRoles);
   };
 
   // Handler: Acknowledge Role -> Start Round 1
-  const handleAcknowledgeRole = () => {
+  const handleAcknowledgeRole = async () => {
     if (!session) return;
     const workSession = startWorkRound(session);
     setSession(workSession);
     setCurrentPhase('WORK_ROUND');
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: 'WORK_ROUND', session: workSession });
+    await syncSessionToFirestore(workSession);
   };
 
   // Handler: Code Edit in Monaco + Git Commit & Replay Telemetry
@@ -818,34 +841,20 @@ export const App: React.FC = () => {
           <LoginPage
             onLoginSuccess={(username) => {
               const cleanName = username.includes('@') ? username.split('@')[0] : username;
+              localStorage.setItem('code_mafia_active_user', cleanName);
               const updatedUser = {
                 id: `usr-${Date.now()}`,
                 displayName: cleanName,
                 isAlive: true,
-                isHost: true,
+                isHost: false,
                 isBot: false,
-                isReady: true,
+                isReady: false,
                 avatarColor: 'bg-purple-600',
                 stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
               };
               setCurrentUser(updatedUser);
-              setSession(prev => {
-                const defaultConfig: GameConfig = {
-                  packId: 'task-master-js',
-                  playerCount: 6,
-                  mafiaCount: 2,
-                  workRoundSeconds: 180,
-                  discussionSeconds: 90,
-                  votingSeconds: 45,
-                  transparencyLevel: 'FULL',
-                  tieRule: 'NO_ELIMINATION',
-                  passRateThreshold: 100,
-                  maxRounds: 3
-                };
-                if (!prev) return createInitialSession(defaultConfig, cleanName);
-                const updatedPlayers = prev.players.map((p, i) => i === 0 ? { ...p, displayName: cleanName } : p);
-                return { ...prev, players: updatedPlayers };
-              });
+              setSession(null);
+              sessionStorage.removeItem('code_mafia_active_session');
               setShowFavoritesOnly(false);
               setCurrentPhase('DASHBOARD');
             }}
@@ -882,7 +891,6 @@ export const App: React.FC = () => {
             session={session}
             currentUser={currentUser}
             onToggleReady={handleToggleReady}
-            onAddBotPlayer={handleAddBotPlayer}
             onStartGame={handleStartGame}
           />
         )}

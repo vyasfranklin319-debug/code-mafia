@@ -4,7 +4,7 @@ import {
   Gamepad2, Users, Flame, ArrowRight, Download, RefreshCw, Award, Activity, Search, Star
 } from 'lucide-react';
 import { allContentPacks } from '../contentPacks';
-import { fetchDashboardStatsFromFirestore, saveDashboardStatsToFirestore } from '../services/firebaseStore';
+import { fetchDashboardStatsFromFirestore, saveDashboardStatsToFirestore, fetchOnlineUsersFromFirestore, UserProfileData } from '../services/firebaseStore';
 
 interface BattleGridDashboardProps {
   onNewGame: () => void;
@@ -37,13 +37,22 @@ export const BattleGridDashboard: React.FC<BattleGridDashboardProps> = ({
     }
   });
 
-  // Sync dashboard favorite packs with Cloud Firestore on mount
+  const [onlineOperatives, setOnlineOperatives] = useState<UserProfileData[]>([]);
+
+  // Sync dashboard favorite packs and live operatives with Cloud Firestore on mount
   useEffect(() => {
     const loadFirestoreDashboard = async () => {
       try {
         const stats = await fetchDashboardStatsFromFirestore('global_user');
         if (stats && stats.favoritePacks && stats.favoritePacks.length > 0) {
           setFavoritePackIds(stats.favoritePacks);
+        }
+      } catch (e) {}
+
+      try {
+        const users = await fetchOnlineUsersFromFirestore();
+        if (users && users.length > 0) {
+          setOnlineOperatives(users);
         }
       } catch (e) {}
     };
@@ -61,10 +70,6 @@ export const BattleGridDashboard: React.FC<BattleGridDashboardProps> = ({
     // Save updated dashboard telemetry to Cloud Firestore
     saveDashboardStatsToFirestore('global_user', { favoritePacks: next });
   };
-
-  const friends = [
-    { name: 'Server Node #1 (127.0.0.1:3001)', status: 'Active • Node.js Express Engine', role: 'Realtime SSE Stream', color: 'from-purple-600 to-indigo-600', isOnline: true }
-  ];
 
   // Filter packs if showFavoritesOnly is active
   const displayedPacks = showFavoritesOnly
@@ -357,29 +362,36 @@ export const BattleGridDashboard: React.FC<BattleGridDashboardProps> = ({
             </div>
 
             <div className="space-y-3">
-              {friends.map((f, idx) => (
-                <div key={idx} className="p-3 rounded-2xl bg-[#141520] border border-white/5 flex items-center justify-between hover:border-purple-500/30 transition-all">
-                  <div className="flex items-center space-x-3">
-                    <div className="relative">
-                      <div className={`w-9 h-9 rounded-xl bg-gradient-to-tr ${f.color} text-white font-black flex items-center justify-center text-xs shadow-md`}>
-                        {f.name.slice(0, 2).toUpperCase()}
+              {onlineOperatives.length > 0 ? (
+                onlineOperatives.map((op, idx) => (
+                  <div key={op.uid || idx} className="p-3 rounded-2xl bg-[#141520] border border-white/5 flex items-center justify-between hover:border-purple-500/30 transition-all">
+                    <div className="flex items-center space-x-3">
+                      <div className="relative">
+                        <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-purple-600 to-indigo-600 text-white font-black flex items-center justify-center text-xs shadow-md">
+                          {op.username.slice(0, 2).toUpperCase()}
+                        </div>
+                        <span className="w-2.5 h-2.5 rounded-full absolute -bottom-0.5 -right-0.5 border-2 border-[#141520] bg-emerald-400" />
                       </div>
-                      <span className={`w-2.5 h-2.5 rounded-full absolute -bottom-0.5 -right-0.5 border-2 border-[#141520] ${f.isOnline ? 'bg-emerald-400' : 'bg-slate-500'}`} />
+                      <div>
+                        <span className="font-bold text-xs text-slate-100 block leading-tight">{op.username}</span>
+                        <span className="text-[10px] text-purple-400 font-mono block leading-tight">{op.rankTitle || 'Operative'} • {op.xp || 100} XP</span>
+                      </div>
                     </div>
-                    <div>
-                      <span className="font-bold text-xs text-slate-100 block leading-tight">{f.name}</span>
-                      <span className="text-[10px] text-slate-400 block leading-tight">{f.status}</span>
-                    </div>
-                  </div>
 
-                  <button 
-                    onClick={onNewGame}
-                    className="px-3 py-1.5 rounded-xl bg-purple-600/20 hover:bg-purple-600/40 text-purple-300 border border-purple-500/30 text-[10px] font-bold transition-colors"
-                  >
-                    REQUEST
-                  </button>
+                    <button 
+                      onClick={onNewGame}
+                      className="px-3 py-1.5 rounded-xl bg-purple-600/20 hover:bg-purple-600/40 text-purple-300 border border-purple-500/30 text-[10px] font-bold transition-colors"
+                    >
+                      INVITE
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="p-4 rounded-xl bg-[#141520] border border-dashed border-white/10 text-center space-y-1">
+                  <p className="text-xs text-slate-400 font-medium">No other operatives online</p>
+                  <p className="text-[10px] text-purple-400 font-mono">Launch a match to share your Room PIN!</p>
                 </div>
-              ))}
+              )}
             </div>
           </div>
         </div>
