@@ -81,32 +81,81 @@ export async function getUserProfileFromFirestore(userId: string): Promise<UserP
 
 /**
  * 2. LIVE GAME SESSION STORAGE (Firestore Collection: 'sessions')
- * Persists room phase, current round, join code, and player roster
+ * Persists room phase, current round, join code, and full player roster in real-time
  */
 export async function syncSessionToFirestore(session: GameSession) {
   if (!session || !session.id) return;
   try {
-    const sessionRef = doc(db, 'sessions', session.id);
+    const sanitizedPlayers = (session.players || []).map(p => ({
+      id: p.id,
+      displayName: p.displayName,
+      isAlive: p.isAlive,
+      isHost: p.isHost,
+      isBot: p.isBot,
+      isReady: p.isReady,
+      avatarColor: p.avatarColor || 'bg-purple-600',
+      stats: p.stats || { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+    }));
+
     const payload = {
       id: session.id,
       joinCode: session.joinCode,
       phase: session.phase,
       currentRound: session.currentRound,
       hostName: session.players?.find(p => p.isHost)?.displayName || session.players?.[0]?.displayName || 'OperativeHost',
-      playersCount: session.players ? session.players.length : 0,
+      players: sanitizedPlayers,
+      playersCount: sanitizedPlayers.length,
       winner: session.winner || null,
       updatedAt: serverTimestamp()
     };
 
-    await setDoc(sessionRef, payload, { merge: true });
-    console.log(`[Cloud Firestore] Synced session state: sessions/${session.id} (Phase: ${session.phase})`);
+    // Store under session ID
+    await setDoc(doc(db, 'sessions', session.id), payload, { merge: true });
+    
+    // Also store/link under joinCode for instant PIN lookup
+    if (session.joinCode) {
+      await setDoc(doc(db, 'sessions', session.joinCode.toUpperCase()), payload, { merge: true });
+    }
+
+    console.log(`[Cloud Firestore] Synced session state: sessions/${session.id} & sessions/${session.joinCode} (${sanitizedPlayers.length} players)`);
   } catch (e: any) {
     console.warn('[Cloud Firestore Session Sync Warning]:', e.message);
   }
 }
 
 /**
- * 2b. GLOBAL MATCHMAKING SCANNER (Firestore Collection: 'sessions')
+ * 2b. FETCH SESSION BY PIN OR ID
+ */
+export async function getSessionFromFirestore(pinOrId: string): Promise<any | null> {
+  if (!pinOrId) return null;
+  const cleanKey = pinOrId.trim().toUpperCase();
+
+  try {
+    // 1. Direct doc lookup by joinCode or ID
+    const directDoc = await getDoc(doc(db, 'sessions', cleanKey));
+    if (directDoc.exists()) {
+      return directDoc.data();
+    }
+
+    // 2. Query search
+    const querySnapshot = await getDocs(collection(db, 'sessions'));
+    let found: any = null;
+    querySnapshot.forEach((docSnap) => {
+      const data = docSnap.data();
+      if (data && (data.joinCode === cleanKey || data.id === pinOrId)) {
+        found = data;
+      }
+    });
+
+    return found;
+  } catch (e: any) {
+    console.warn('[Cloud Firestore Session Lookup Error]:', e.message);
+    return null;
+  }
+}
+
+/**
+ * 2c. GLOBAL MATCHMAKING SCANNER (Firestore Collection: 'sessions')
  * Scans live open rooms in Cloud Firestore with phase === 'LOBBY'
  */
 export async function findGlobalOpenSessionFromFirestore(): Promise<any | null> {
@@ -132,8 +181,8 @@ export async function findGlobalOpenSessionFromFirestore(): Promise<any | null> 
  * 3. REALTIME FIRESTORE LISTENER
  * Subscribes to live room state changes
  */
-export function listenToFirestoreSession(sessionId: string, onUpdate: (data: any) => void): Unsubscribe {
-  const sessionRef = doc(db, 'sessions', sessionId);
+export function listenToFirestoreSession(sessionIdOrPin: string, onUpdate: (data: any) => void): Unsubscribe {
+  const sessionRef = doc(db, 'sessions', sessionIdOrPin);
   return onSnapshot(sessionRef, (snapshot) => {
     if (snapshot.exists()) {
       onUpdate(snapshot.data());

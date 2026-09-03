@@ -123,18 +123,46 @@ export const App: React.FC = () => {
     if (session) {
       syncSessionToFirestore(session);
     }
-  }, [session?.phase, session?.currentRound, session?.players?.length, session?.winner]);
+  }, [session?.phase, session?.currentRound, session?.players, session?.winner]);
 
   // Realtime Cloud Firestore Stream Listener
   useEffect(() => {
-    if (!session?.id) return;
-    const unsubscribe = listenToFirestoreSession(session.id, (firestoreData) => {
-      if (firestoreData && firestoreData.phase && session && firestoreData.phase !== session.phase) {
-        setCurrentPhase(firestoreData.phase);
+    const activeKey = session?.joinCode || session?.id;
+    if (!activeKey) return;
+
+    const unsubscribe = listenToFirestoreSession(activeKey, (firestoreData) => {
+      if (firestoreData) {
+        setSession(prev => {
+          if (!prev) return prev;
+          let updated = { ...prev };
+          let changed = false;
+
+          if (firestoreData.phase && firestoreData.phase !== prev.phase) {
+            updated.phase = firestoreData.phase;
+            setCurrentPhase(firestoreData.phase);
+            changed = true;
+          }
+
+          if (firestoreData.players && Array.isArray(firestoreData.players)) {
+            const mergedPlayers = firestoreData.players.map((fp: any) => {
+              if (currentUser && fp.displayName === currentUser.displayName) {
+                return { ...fp, ...currentUser, isReady: fp.isReady ?? currentUser.isReady };
+              }
+              return fp;
+            });
+            if (JSON.stringify(mergedPlayers) !== JSON.stringify(prev.players)) {
+              updated.players = mergedPlayers;
+              changed = true;
+            }
+          }
+
+          return changed ? updated : prev;
+        });
       }
     });
+
     return () => unsubscribe();
-  }, [session?.id]);
+  }, [session?.id, session?.joinCode, currentUser?.displayName]);
 
   // Handler: Create Game
   const handleCreateGame = async (config: GameConfig, hostName: string) => {
@@ -161,6 +189,7 @@ export const App: React.FC = () => {
       setSession(newSession);
       setCurrentUser(prev => prev ? { ...prev, displayName: effectiveHost } : newSession.players[0]);
       setCurrentPhase('LOBBY');
+      syncSessionToFirestore(newSession);
     } catch (e) {
       const newSession = createInitialSession(config, effectiveHost);
       newSession.hostName = effectiveHost;
@@ -170,6 +199,7 @@ export const App: React.FC = () => {
       setSession(newSession);
       setCurrentUser(prev => prev ? { ...prev, displayName: effectiveHost } : newSession.players[0]);
       setCurrentPhase('LOBBY');
+      syncSessionToFirestore(newSession);
     }
   };
 
@@ -178,23 +208,29 @@ export const App: React.FC = () => {
     const activeUserName = currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'JoiningOperative';
     const cleanPin = pinCode.trim().toUpperCase();
 
+    const joiningPlayer: Player = {
+      id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      displayName: activeUserName,
+      isAlive: true,
+      isHost: false,
+      isBot: false,
+      isReady: false,
+      avatarColor: 'bg-purple-600',
+      stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+    };
+
     try {
-      const { apiGetSession } = await import('./services/apiClient');
-      const publicSess = await apiGetSession(cleanPin);
+      const { getSessionFromFirestore, syncSessionToFirestore } = await import('./services/firebaseStore');
+      const firestoreDoc = await getSessionFromFirestore(cleanPin);
 
-      const newPlayer: Player = {
-        id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        displayName: activeUserName,
-        isAlive: true,
-        isHost: false,
-        isBot: false,
-        isReady: false,
-        avatarColor: 'bg-[#8b5cf6]',
-        stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
-      };
+      let targetSession: GameSession;
 
-      setSession(prev => {
-        const base = prev || createInitialSession({
+      if (firestoreDoc) {
+        const existingPlayers = Array.isArray(firestoreDoc.players) ? firestoreDoc.players : [];
+        const exists = existingPlayers.some((p: any) => p.displayName === activeUserName);
+        const updatedPlayers = exists ? existingPlayers : [...existingPlayers, joiningPlayer];
+
+        const defaultConfig: GameConfig = {
           packId: 'task-master-js',
           playerCount: 6,
           mafiaCount: 2,
@@ -205,47 +241,42 @@ export const App: React.FC = () => {
           tieRule: 'NO_ELIMINATION',
           passRateThreshold: 100,
           maxRounds: 3
-        }, 'HostOperative');
+        };
 
-        // Check if player already in roster
-        const exists = base.players.some(p => p.displayName === activeUserName);
-        const updatedPlayers = exists ? base.players : [...base.players, newPlayer];
-
-        return {
+        const base = createInitialSession(defaultConfig, firestoreDoc.hostName || 'HostOperative');
+        targetSession = {
           ...base,
-          id: (publicSess && publicSess.id) ? publicSess.id : base.id,
-          joinCode: (publicSess && publicSess.joinCode) ? publicSess.joinCode : cleanPin,
-          phase: (publicSess && publicSess.phase) ? publicSess.phase : 'LOBBY',
+          id: firestoreDoc.id || cleanPin,
+          joinCode: firestoreDoc.joinCode || cleanPin,
+          phase: firestoreDoc.phase || 'LOBBY',
           players: updatedPlayers
         };
-      });
-
-      setCurrentUser(newPlayer);
-      setCurrentPhase('LOBBY');
-    } catch (e) {
-      const newPlayer: Player = {
-        id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        displayName: activeUserName,
-        isAlive: true,
-        isHost: false,
-        isBot: false,
-        isReady: false,
-        avatarColor: 'bg-[#8b5cf6]',
-        stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
-      };
-
-      setSession(prev => {
-        if (!prev) return null;
-        const exists = prev.players.some(p => p.displayName === activeUserName);
-        return {
-          ...prev,
-          joinCode: cleanPin,
-          players: exists ? prev.players : [...prev.players, newPlayer]
+      } else {
+        const defaultConfig: GameConfig = {
+          packId: 'task-master-js',
+          playerCount: 6,
+          mafiaCount: 2,
+          workRoundSeconds: 180,
+          discussionSeconds: 90,
+          votingSeconds: 45,
+          transparencyLevel: 'FULL',
+          tieRule: 'NO_ELIMINATION',
+          passRateThreshold: 100,
+          maxRounds: 3
         };
-      });
+        targetSession = createInitialSession(defaultConfig, activeUserName);
+        targetSession.joinCode = cleanPin;
+        targetSession.players = [joiningPlayer];
+      }
 
-      setCurrentUser(newPlayer);
+      setSession(targetSession);
+      setCurrentUser(joiningPlayer);
       setCurrentPhase('LOBBY');
+
+      // Sync updated room with new player immediately to Cloud Firestore
+      await syncSessionToFirestore(targetSession);
+    } catch (e) {
+      console.warn('[Join PIN Error]:', e);
     }
   };
 
