@@ -37,24 +37,42 @@ export const App: React.FC = () => {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [currentPhase, setCurrentPhase] = useState<Phase>('LOGIN');
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
-  
-  // Initialize default session on launch so NEXUS ARENA views render instantly
-  const initialConfig: GameConfig = {
-    packId: 'task-master-js',
-    playerCount: 6,
-    mafiaCount: 2,
-    workRoundSeconds: 180,
-    discussionSeconds: 90,
-    votingSeconds: 45,
-    transparencyLevel: 'FULL',
-    tieRule: 'NO_ELIMINATION',
-    passRateThreshold: 100,
-    maxRounds: 3
-  };
-  const defaultSession = createInitialSession(initialConfig, 'OperativeAlpha');
+  // Initialize default session once on mount so NEXUS ARENA views render instantly with a STABLE room code
+  const [session, setSession] = useState<GameSession | null>(() => {
+    try {
+      const savedSession = sessionStorage.getItem('code_mafia_active_session');
+      if (savedSession) {
+        return JSON.parse(savedSession);
+      }
+    } catch (e) {}
 
-  const [session, setSession] = useState<GameSession | null>(defaultSession);
-  const [currentUser, setCurrentUser] = useState<Player | null>(defaultSession.players[0]);
+    const initialConfig: GameConfig = {
+      packId: 'task-master-js',
+      playerCount: 6,
+      mafiaCount: 2,
+      workRoundSeconds: 180,
+      discussionSeconds: 90,
+      votingSeconds: 45,
+      transparencyLevel: 'FULL',
+      tieRule: 'NO_ELIMINATION',
+      passRateThreshold: 100,
+      maxRounds: 3
+    };
+    return createInitialSession(initialConfig, 'OperativeAlpha');
+  });
+
+  const [currentUser, setCurrentUser] = useState<Player | null>(() => {
+    return session?.players?.[0] || null;
+  });
+
+  // Persist session to sessionStorage to maintain stable room code across renders and refreshes
+  useEffect(() => {
+    if (session) {
+      try {
+        sessionStorage.setItem('code_mafia_active_session', JSON.stringify(session));
+      } catch (e) {}
+    }
+  }, [session?.id, session?.joinCode]);
   const [isTestRunning, setIsTestRunning] = useState(false);
   const [isNextEditShadow, setIsNextEditShadow] = useState(false);
 
@@ -755,7 +773,19 @@ export const App: React.FC = () => {
               };
               setCurrentUser(updatedUser);
               setSession(prev => {
-                if (!prev) return createInitialSession(initialConfig, cleanName);
+                const defaultConfig: GameConfig = {
+                  packId: 'task-master-js',
+                  playerCount: 6,
+                  mafiaCount: 2,
+                  workRoundSeconds: 180,
+                  discussionSeconds: 90,
+                  votingSeconds: 45,
+                  transparencyLevel: 'FULL',
+                  tieRule: 'NO_ELIMINATION',
+                  passRateThreshold: 100,
+                  maxRounds: 3
+                };
+                if (!prev) return createInitialSession(defaultConfig, cleanName);
                 const updatedPlayers = prev.players.map((p, i) => i === 0 ? { ...p, displayName: cleanName } : p);
                 return { ...prev, players: updatedPlayers };
               });
