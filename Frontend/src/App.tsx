@@ -146,10 +146,12 @@ export const App: React.FC = () => {
 
           if (firestoreData.players && Array.isArray(firestoreData.players)) {
             const mergedPlayers = firestoreData.players.map((fp: any) => {
+              const isThisHost = fp.isHost || fp.displayName === firestoreData.hostName;
+              const baseObj = { ...fp, isHost: isThisHost };
               if (currentUser && fp.displayName === currentUser.displayName) {
-                return { ...fp, ...currentUser, isReady: fp.isReady ?? currentUser.isReady };
+                return { ...baseObj, isHost: isThisHost, isReady: fp.isReady ?? currentUser.isReady };
               }
-              return fp;
+              return baseObj;
             });
             if (JSON.stringify(mergedPlayers) !== JSON.stringify(prev.players)) {
               updated.players = mergedPlayers;
@@ -159,6 +161,13 @@ export const App: React.FC = () => {
 
           return changed ? updated : prev;
         });
+
+        // Ensure currentUser.isHost matches room host status
+        if (currentUser && firestoreData.hostName && currentUser.displayName === firestoreData.hostName) {
+          if (!currentUser.isHost) {
+            setCurrentUser(prev => prev ? { ...prev, isHost: true } : prev);
+          }
+        }
       }
     });
 
@@ -188,10 +197,13 @@ export const App: React.FC = () => {
       newSession.hostName = effectiveHost;
       if (newSession.players && newSession.players.length > 0) {
         newSession.players[0].displayName = effectiveHost;
+        newSession.players[0].isHost = true;
       }
 
+      const hostPlayer = newSession.players[0];
+
       setSession(newSession);
-      setCurrentUser(prev => prev ? { ...prev, displayName: effectiveHost } : newSession.players[0]);
+      setCurrentUser(hostPlayer);
       setCurrentPhase('LOBBY');
       syncSessionToFirestore(newSession);
     } catch (e) {
@@ -199,9 +211,12 @@ export const App: React.FC = () => {
       newSession.hostName = effectiveHost;
       if (newSession.players && newSession.players.length > 0) {
         newSession.players[0].displayName = effectiveHost;
+        newSession.players[0].isHost = true;
       }
+      const hostPlayer = newSession.players[0];
+
       setSession(newSession);
-      setCurrentUser(prev => prev ? { ...prev, displayName: effectiveHost } : newSession.players[0]);
+      setCurrentUser(hostPlayer);
       setCurrentPhase('LOBBY');
       syncSessionToFirestore(newSession);
     }
@@ -327,16 +342,19 @@ export const App: React.FC = () => {
       };
 
       const newSession = createInitialSession(defaultConfig, activeUserName);
-      if (apiRes.sessionId) newSession.id = apiRes.sessionId;
-      if (apiRes.joinCode) newSession.joinCode = apiRes.joinCode;
+      if (apiRes && apiRes.sessionId) newSession.id = apiRes.sessionId;
+      if (apiRes && apiRes.joinCode) newSession.joinCode = apiRes.joinCode;
       newSession.hostName = activeUserName;
       if (newSession.players && newSession.players.length > 0) {
         newSession.players[0].displayName = activeUserName;
+        newSession.players[0].isHost = true;
       }
+      const hostPlayer = newSession.players[0];
 
       setSession(newSession);
-      setCurrentUser(prev => prev ? { ...prev, displayName: activeUserName, isHost: true } : newSession.players[0]);
+      setCurrentUser(hostPlayer);
       setCurrentPhase('LOBBY');
+      syncSessionToFirestore(newSession);
     } catch (e) {
       // Fallback: Create local session
       const defaultConfig: GameConfig = {
@@ -356,10 +374,14 @@ export const App: React.FC = () => {
       newSession.hostName = activeUserName;
       if (newSession.players && newSession.players.length > 0) {
         newSession.players[0].displayName = activeUserName;
+        newSession.players[0].isHost = true;
       }
+      const hostPlayer = newSession.players[0];
+
       setSession(newSession);
-      setCurrentUser(prev => prev ? { ...prev, displayName: activeUserName, isHost: true } : newSession.players[0]);
+      setCurrentUser(hostPlayer);
       setCurrentPhase('LOBBY');
+      syncSessionToFirestore(newSession);
     }
   };
 
