@@ -134,7 +134,8 @@ export const App: React.FC = () => {
       if (firestoreData) {
         setSession(prev => {
           if (!prev) return prev;
-          let updated = { ...prev };
+          // IMMUTABLE JOIN CODE LOCK: Never allow joinCode to change once established
+          let updated = { ...prev, joinCode: prev.joinCode };
           let changed = false;
 
           if (firestoreData.phase && firestoreData.phase !== prev.phase) {
@@ -169,6 +170,9 @@ export const App: React.FC = () => {
     const effectiveHost = hostName.trim() || currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
     localStorage.setItem('code_mafia_active_user', effectiveHost);
 
+    // Pre-generate a SINGLE STABLE PIN code so it NEVER changes
+    const stableJoinCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+
     try {
       const apiRes = await apiCreateSession({
         hostName: effectiveHost,
@@ -177,9 +181,9 @@ export const App: React.FC = () => {
         mafiaCount: config.mafiaCount
       });
 
-      const newSession = createInitialSession(config, effectiveHost);
-      if (apiRes.sessionId) newSession.id = apiRes.sessionId;
-      if (apiRes.joinCode) newSession.joinCode = apiRes.joinCode;
+      const chosenCode = (apiRes && apiRes.joinCode) ? apiRes.joinCode : stableJoinCode;
+      const newSession = createInitialSession(config, effectiveHost, chosenCode);
+      if (apiRes && apiRes.sessionId) newSession.id = apiRes.sessionId;
 
       newSession.hostName = effectiveHost;
       if (newSession.players && newSession.players.length > 0) {
@@ -191,7 +195,7 @@ export const App: React.FC = () => {
       setCurrentPhase('LOBBY');
       syncSessionToFirestore(newSession);
     } catch (e) {
-      const newSession = createInitialSession(config, effectiveHost);
+      const newSession = createInitialSession(config, effectiveHost, stableJoinCode);
       newSession.hostName = effectiveHost;
       if (newSession.players && newSession.players.length > 0) {
         newSession.players[0].displayName = effectiveHost;

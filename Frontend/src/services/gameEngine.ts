@@ -12,9 +12,9 @@ import {
 import { getContentPackById } from '../contentPacks';
 import { generateBotPlayers, decideBotVote, generateBotChat } from './botSim';
 
-export function createInitialSession(config: GameConfig, hostName: string): GameSession {
+export function createInitialSession(config: GameConfig, hostName: string, customJoinCode?: string): GameSession {
   const contentPack = getContentPackById(config.packId);
-  const joinCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const joinCode = customJoinCode ? customJoinCode.toUpperCase() : Math.random().toString(36).substring(2, 8).toUpperCase();
 
   const hostPlayer: Player = {
     id: `player-host-${Date.now()}`,
