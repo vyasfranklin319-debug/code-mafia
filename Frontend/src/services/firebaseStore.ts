@@ -176,21 +176,35 @@ export async function getSessionFromFirestore(pinOrId: string): Promise<any | nu
 
 /**
  * 2c. GLOBAL MATCHMAKING SCANNER (Firestore Collection: 'sessions')
- * Scans live open rooms in Cloud Firestore with phase === 'LOBBY'
+ * Scans live open rooms in Cloud Firestore with phase === 'LOBBY' and available slots.
+ * Deduplicates by joinCode to avoid matching the same room twice (stored under both id and joinCode).
  */
 export async function findGlobalOpenSessionFromFirestore(): Promise<any | null> {
   try {
     const querySnapshot = await getDocs(collection(db, 'sessions'));
-    let openSession: any = null;
+    const seen = new Set<string>();
+    let bestMatch: any = null;
 
     querySnapshot.forEach((docSnap) => {
       const data = docSnap.data();
-      if (data && data.phase === 'LOBBY' && data.playersCount < 6) {
-        openSession = data;
+      if (
+        data &&
+        data.phase === 'LOBBY' &&
+        data.joinCode &&
+        !seen.has(data.joinCode) &&
+        (data.playersCount || data.players?.length || 0) < (data.config?.playerCount || 6)
+      ) {
+        seen.add(data.joinCode);
+        // Prefer the room with the most players already waiting
+        const currentCount = data.playersCount || data.players?.length || 0;
+        const bestCount = bestMatch ? (bestMatch.playersCount || bestMatch.players?.length || 0) : -1;
+        if (currentCount > bestCount) {
+          bestMatch = data;
+        }
       }
     });
 
-    return openSession;
+    return bestMatch;
   } catch (e: any) {
     console.warn('[Cloud Firestore Global Matchmaking Scan Error]:', e.message);
     return null;

@@ -10,7 +10,7 @@ import {
   ChatMessage
 } from '../types/game';
 import { getContentPackById } from '../contentPacks';
-import { generateBotPlayers, decideBotVote, generateBotChat } from './botSim';
+// botSim import removed — bots have been fully purged from the system
 
 export function createInitialSession(config: GameConfig, hostName: string, customJoinCode?: string): GameSession {
   const contentPack = getContentPackById(config.packId);

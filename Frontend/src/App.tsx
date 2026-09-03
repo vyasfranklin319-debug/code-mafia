@@ -165,54 +165,58 @@ export const App: React.FC = () => {
   }, [session?.id, session?.joinCode, currentUser?.id]);
 
   // Realtime Cloud Firestore Stream Listener (Without re-sync write loop)
+  // Listens on the joinCode (canonical PIN key) since that's what syncSessionToFirestore writes to.
   useEffect(() => {
-    const activeKey = (session?.joinCode || session?.id)?.toUpperCase();
-    if (!activeKey) return;
+    // Prefer joinCode because syncSessionToFirestore writes under BOTH id AND joinCode.
+    // Using joinCode ensures all peers (host + joiners) subscribe to the exact same document.
+    const listenKey = session?.joinCode?.toUpperCase() || session?.id?.toUpperCase();
+    if (!listenKey) return;
 
-    const unsubscribe = listenToFirestoreSession(activeKey, (firestoreData) => {
-      if (firestoreData) {
-        setSession(prev => {
-          if (!prev) return prev;
-          let updated = { ...prev, joinCode: prev.joinCode };
-          let changed = false;
+    const unsubscribe = listenToFirestoreSession(listenKey, (firestoreData) => {
+      if (!firestoreData) return;
 
-          if (firestoreData.phase && firestoreData.phase !== prev.phase) {
-            updated.phase = firestoreData.phase;
-            setCurrentPhase(firestoreData.phase);
+      setSession(prev => {
+        if (!prev) return prev;
+        let updated = { ...prev };
+        let changed = false;
+
+        if (firestoreData.phase && firestoreData.phase !== prev.phase) {
+          updated.phase = firestoreData.phase;
+          setCurrentPhase(firestoreData.phase);
+          changed = true;
+        }
+
+        if (firestoreData.players && Array.isArray(firestoreData.players)) {
+          // Filter out any bots; preserve isHost from Firestore authoritative state
+          const livePlayers = firestoreData.players.filter((p: any) => !p.isBot);
+          const hostName = firestoreData.hostName || livePlayers.find((p: any) => p.isHost)?.displayName || livePlayers[0]?.displayName;
+          const mergedPlayers = livePlayers.map((fp: any) => ({
+            ...fp,
+            isHost: fp.displayName === hostName,
+            isBot: false
+          }));
+          if (JSON.stringify(mergedPlayers) !== JSON.stringify(prev.players)) {
+            updated.players = mergedPlayers;
             changed = true;
           }
-
-          if (firestoreData.players && Array.isArray(firestoreData.players)) {
-            // Filter out any dummy bots and sanitize
-            const livePlayers = firestoreData.players.filter((p: any) => !p.isBot);
-            const mergedPlayers = livePlayers.map((fp: any) => {
-              const isThisHost = fp.isHost || fp.displayName === (firestoreData.hostName || livePlayers[0]?.displayName);
-              const baseObj = { ...fp, isHost: isThisHost, isBot: false };
-              if (currentUser && fp.displayName === currentUser.displayName) {
-                return { ...baseObj, isReady: fp.isReady ?? currentUser.isReady };
-              }
-              return baseObj;
-            });
-            if (JSON.stringify(mergedPlayers) !== JSON.stringify(prev.players)) {
-              updated.players = mergedPlayers;
-              changed = true;
-            }
-          }
-
-          return changed ? updated : prev;
-        });
-
-        // Ensure currentUser.isHost matches room host status
-        if (currentUser && firestoreData.hostName && currentUser.displayName === firestoreData.hostName) {
-          if (!currentUser.isHost) {
-            setCurrentUser(prev => prev ? { ...prev, isHost: true } : prev);
-          }
         }
-      }
+
+        return changed ? updated : prev;
+      });
+
+      // Sync currentUser.isHost to match Firestore authoritative hostName
+      setCurrentUser(prev => {
+        if (!prev || !firestoreData.hostName) return prev;
+        const shouldBeHost = prev.displayName === firestoreData.hostName;
+        if (prev.isHost !== shouldBeHost) {
+          return { ...prev, isHost: shouldBeHost };
+        }
+        return prev;
+      });
     });
 
     return () => unsubscribe();
-  }, [session?.id, session?.joinCode, currentUser?.displayName]);
+  }, [session?.joinCode, session?.id]);
 
   // Handler: Create Game (Mode 1: Launch Arena Match)
   const handleCreateGame = async (config: GameConfig, hostName: string) => {
@@ -278,34 +282,46 @@ export const App: React.FC = () => {
     const activeUserName = currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
     const cleanPin = pinCode.trim().toUpperCase();
 
-    const joiningPlayer: Player = {
-      id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      displayName: activeUserName,
-      isAlive: true,
-      isHost: false,
-      isBot: false,
-      isReady: false,
-      avatarColor: 'bg-purple-600',
-      stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
-    };
-
     try {
       const { getSessionFromFirestore, syncSessionToFirestore } = await import('./services/firebaseStore');
       const firestoreDoc = await getSessionFromFirestore(cleanPin);
 
       let targetSession: GameSession;
+      let meAsPlayer: Player;
 
       if (firestoreDoc) {
-        // Filter out any stale dummy bots
+        // Filter out stale bots from persisted room
         const existingPlayers: Player[] = (Array.isArray(firestoreDoc.players) ? firestoreDoc.players : [])
           .filter((p: any) => !p.isBot);
 
-        const exists = existingPlayers.some((p: any) => p.displayName === activeUserName);
-        const hostName = firestoreDoc.hostName || existingPlayers.find((p: any) => p.isHost)?.displayName || (existingPlayers[0] ? existingPlayers[0].displayName : activeUserName);
+        const hostName = firestoreDoc.hostName
+          || existingPlayers.find((p: any) => p.isHost)?.displayName
+          || existingPlayers[0]?.displayName
+          || activeUserName;
 
-        const updatedPlayers = exists
+        // Check if this user is already in the room — restore their existing data
+        const existingMe = existingPlayers.find((p: any) => p.displayName === activeUserName);
+
+        if (existingMe) {
+          // User is re-joining — preserve their id, ready state, and host flag
+          meAsPlayer = { ...existingMe, isHost: existingMe.displayName === hostName };
+        } else {
+          // New joiner — create fresh player entry
+          meAsPlayer = {
+            id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            displayName: activeUserName,
+            isAlive: true,
+            isHost: false,
+            isBot: false,
+            isReady: false,
+            avatarColor: 'bg-purple-600',
+            stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+          };
+        }
+
+        const updatedPlayers = existingMe
           ? existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName }))
-          : [...existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName })), joiningPlayer];
+          : [...existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName })), meAsPlayer];
 
         const matchConfig: GameConfig = firestoreDoc.config || {
           packId: 'task-master-js',
@@ -330,6 +346,17 @@ export const App: React.FC = () => {
           players: updatedPlayers
         };
       } else {
+        // Room not found — user becomes the host of a new room with this PIN
+        meAsPlayer = {
+          id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          displayName: activeUserName,
+          isAlive: true,
+          isHost: true,
+          isBot: false,
+          isReady: true,
+          avatarColor: 'bg-purple-600',
+          stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+        };
         const defaultConfig: GameConfig = {
           packId: 'task-master-js',
           playerCount: 6,
@@ -345,23 +372,23 @@ export const App: React.FC = () => {
         targetSession = createInitialSession(defaultConfig, activeUserName, cleanPin);
         targetSession.joinCode = cleanPin;
         targetSession.hostName = activeUserName;
-        joiningPlayer.isHost = true;
-        targetSession.players = [joiningPlayer];
+        targetSession.players = [meAsPlayer];
       }
 
       setSession(targetSession);
-      setCurrentUser(joiningPlayer);
+      setCurrentUser(meAsPlayer);
       setCurrentPhase('LOBBY');
 
-      // Sync updated room with new live player to Cloud Firestore
-      await syncSessionToFirestore(targetSession);
-
-      // Broadcast player join across WebSocket Durable Object
-      emitMultiplayerEvent('PLAYER_JOINED', {
-        roomId: cleanPin,
-        player: joiningPlayer,
-        sessionData: targetSession
-      });
+      // Only sync to Firestore if user is new to this room (not a re-join)
+      const wasAlreadyInRoom = firestoreDoc && firestoreDoc.players?.some((p: any) => p.displayName === activeUserName);
+      if (!wasAlreadyInRoom) {
+        await syncSessionToFirestore(targetSession);
+        emitMultiplayerEvent('PLAYER_JOINED', {
+          roomId: cleanPin,
+          player: meAsPlayer,
+          sessionData: targetSession
+        });
+      }
     } catch (e) {
       console.warn('[Join PIN Error]:', e);
     }
