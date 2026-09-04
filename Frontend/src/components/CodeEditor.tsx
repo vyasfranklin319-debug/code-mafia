@@ -1,27 +1,109 @@
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
 import { ContentFile, Player } from '../types/game';
 import { Edit3, Lock, FileCode } from 'lucide-react';
+import Editor from '@monaco-editor/react';
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
 
 interface CodeEditorProps {
   file: ContentFile;
   onChange: (newContent: string) => void;
   activePlayers: Player[];
   readOnly?: boolean;
+  roomCode: string;
+  currentUser: Player;
+}
+
+const getYjsUrl = () => {
+  const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  if (host === 'localhost' || host === '127.0.0.1') {
+    return (import.meta as any).env?.VITE_WS_URL || 'ws://localhost:3001';
+  }
+  return 'wss://code-mafia-api.codemafia.workers.dev';
+};
+
+// Cache Yjs docs per file to avoid re-creating them
+const ydocCache = new Map<string, { ydoc: Y.Doc; provider: WebsocketProvider }>();
+
+function getOrCreateYjsDoc(roomCode: string, filePath: string) {
+  const key = `${roomCode}-${filePath}`;
+  if (!ydocCache.has(key)) {
+    const ydoc = new Y.Doc();
+    const wsUrl = getYjsUrl();
+    const provider = new WebsocketProvider(wsUrl, `code-mafia-${key}`, ydoc);
+    ydocCache.set(key, { ydoc, provider });
+  }
+  return ydocCache.get(key)!;
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({
   file,
   onChange,
   activePlayers,
-  readOnly = false
+  readOnly = false,
+  roomCode,
+  currentUser
 }) => {
   const isFileReadOnly = readOnly || file.readOnly;
-  const lines = file.currentContent.split('\n');
+  const editorRef = useRef<any>(null);
+  const suppressChangeRef = useRef(false);
+
+  const handleEditorDidMount = (editor: any) => {
+    editorRef.current = editor;
+
+    const { ydoc, provider } = getOrCreateYjsDoc(roomCode, file.path);
+    const ytext = ydoc.getText('monaco');
+
+    // Set user awareness
+    provider.awareness.setLocalStateField('user', {
+      name: currentUser.displayName,
+      color: '#7c3aed',
+    });
+
+    // Initialize content from Yjs if empty
+    if (ytext.length === 0 && file.currentContent) {
+      ydoc.transact(() => {
+        ytext.insert(0, file.currentContent);
+      });
+    }
+
+    // Sync Yjs -> Monaco
+    const yjsObserver = () => {
+      const model = editor.getModel();
+      if (!model) return;
+      const yjsText = ytext.toString();
+      const monacoText = model.getValue();
+      if (yjsText !== monacoText) {
+        suppressChangeRef.current = true;
+        const pos = editor.getPosition();
+        model.setValue(yjsText);
+        if (pos) editor.setPosition(pos);
+        suppressChangeRef.current = false;
+      }
+    };
+    ytext.observe(yjsObserver);
+
+    // Sync Monaco -> Yjs
+    editor.onDidChangeModelContent(() => {
+      if (suppressChangeRef.current || isFileReadOnly) return;
+      const model = editor.getModel();
+      if (!model) return;
+      const monacoText = model.getValue();
+      const yjsText = ytext.toString();
+      if (monacoText !== yjsText) {
+        ydoc.transact(() => {
+          ytext.delete(0, ytext.length);
+          ytext.insert(0, monacoText);
+        });
+      }
+      onChange(monacoText);
+    });
+  };
 
   return (
-    <div className="flex-1 h-full flex flex-col bg-[#0D1117] border-r border-slate-800 relative select-none">
+    <div className="flex-1 h-full flex flex-col bg-[#0D1117] border-r border-slate-800 relative">
       {/* Editor Header Tab Bar */}
-      <div className="h-10 bg-[#161B22] border-b border-slate-800 px-4 flex items-center justify-between text-xs">
+      <div className="h-10 bg-[#161B22] border-b border-slate-800 px-4 flex items-center justify-between text-xs shrink-0">
         <div className="flex items-center space-x-2">
           <FileCode className="w-4 h-4 text-cyan-400" />
           <span className="font-mono text-slate-200 font-medium">{file.name}</span>
@@ -44,7 +126,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               <div
                 key={p.id}
                 title={`${p.displayName} is viewing this file`}
-                className={`w-5 h-5 rounded-full ${p.avatarColor} text-white font-bold text-[10px] flex items-center justify-center ring-2 ring-dark-900 uppercase`}
+                className={`w-5 h-5 rounded-full ${p.avatarColor} text-white font-bold text-[10px] flex items-center justify-center ring-2 ring-[#0D1117] uppercase`}
               >
                 {p.displayName.charAt(0)}
               </div>
@@ -53,33 +135,38 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         </div>
       </div>
 
-      {/* Editor Main Body */}
-      <div className="flex-1 relative flex overflow-hidden font-mono text-xs">
-        {/* Line Numbers Gutter */}
-        <div className="w-12 bg-[#161B22]/60 py-3 text-right pr-3 select-none text-slate-600 border-r border-slate-800/60 leading-6 shrink-0">
-          {lines.map((_, i) => (
-            <div key={i}>{i + 1}</div>
-          ))}
-        </div>
-
-        {/* Interactive Textarea Code Editor */}
-        <div className="flex-1 relative h-full">
-          <textarea
-            value={file.currentContent}
-            onChange={(e) => !isFileReadOnly && onChange(e.target.value)}
-            disabled={isFileReadOnly}
-            spellCheck={false}
-            autoCapitalize="off"
-            autoComplete="off"
-            className="w-full h-full bg-transparent text-slate-100 p-3 leading-6 font-mono resize-none focus:outline-none selection:bg-blue-600/40 tab-size-2"
-            style={{
-              fontFamily: "'Fira Code', 'Consolas', 'Courier New', monospace",
-              fontSize: '13px',
-              lineHeight: '24px',
-              tabSize: 2
-            }}
-          />
-        </div>
+      {/* Monaco Editor */}
+      <div className="flex-1 relative overflow-hidden">
+        <Editor
+          key={file.path}
+          height="100%"
+          defaultLanguage={
+            file.path?.endsWith('.ts') || file.path?.endsWith('.tsx')
+              ? 'typescript'
+              : file.path?.endsWith('.py')
+              ? 'python'
+              : file.path?.endsWith('.java')
+              ? 'java'
+              : 'javascript'
+          }
+          theme="vs-dark"
+          defaultValue={file.currentContent}
+          options={{
+            readOnly: isFileReadOnly,
+            minimap: { enabled: false },
+            fontSize: 13,
+            fontFamily: "'Fira Code', 'Consolas', 'Courier New', monospace",
+            lineHeight: 24,
+            tabSize: 2,
+            wordWrap: 'on',
+            scrollBeyondLastLine: false,
+            smoothScrolling: true,
+            cursorBlinking: 'smooth',
+            automaticLayout: true,
+            padding: { top: 12 },
+          }}
+          onMount={handleEditorDidMount}
+        />
       </div>
     </div>
   );

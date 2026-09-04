@@ -288,7 +288,13 @@ export const App: React.FC = () => {
       }
     });
 
-    return () => disconnectSocket();
+    return () => {
+      // FIX BUG: Do NOT call disconnectSocket() here.
+      // The socket is a singleton — disconnecting it on session state changes
+      // killed ALL players' connections whenever a new player joined (because
+      // the session state update re-ran this effect, triggering disconnect).
+      // Socket cleanup happens only on intentional logout / page unload.
+    };
   // FIX BUG 2: Remove currentUser?.id — Firestore listener updates currentUser which was
   // causing the socket to disconnect/reconnect on every player join event.
   // The socket room key only depends on the session keys, not on currentUser identity.

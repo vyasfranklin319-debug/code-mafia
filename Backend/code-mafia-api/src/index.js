@@ -64,17 +64,24 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    // ─── WebSocket Upgrade → Durable Object ──────────────────
-    if (path.startsWith('/ws/room/')) {
-      const upgradeHeader = request.headers.get('Upgrade');
-      if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
-        return json({ error: 'Expected WebSocket upgrade' }, 426);
-      }
+    // ─── WebSocket Upgrade & Durable Object Routing ──────────
+    if (path.startsWith('/ws/room/') || path.startsWith('/api/v1/rooms/')) {
+      const roomId = path.startsWith('/ws/room/')
+        ? path.split('/ws/room/')[1]?.split('?')[0] || 'default'
+        : path.split('/api/v1/rooms/')[1]?.split('/')[0] || 'default';
 
-      const roomId = path.split('/ws/room/')[1]?.split('?')[0] || 'default';
-      const id = env.GAME_ROOM.idFromName(roomId);
+      const cleanRoomId = roomId.trim().toUpperCase();
+      const id = env.GAME_ROOM.idFromName(cleanRoomId);
       const stub = env.GAME_ROOM.get(id);
       return stub.fetch(request);
+    }
+
+    // ─── Fallback for Socket.IO polling requests ─────────────
+    if (path.startsWith('/socket.io/')) {
+      return json({
+        code: 0,
+        message: 'Transport unknown. Please use native WebSocket via /ws/room/:roomId on Cloudflare Workers.'
+      }, 400);
     }
 
     // ─── API Routes ──────────────────────────────────────────

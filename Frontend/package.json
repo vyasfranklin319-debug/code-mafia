@@ -10,6 +10,7 @@
     "server": "node server/index.js"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
     "express": "^4.19.2",
@@ -19,7 +20,10 @@
     "react-dom": "^18.3.1",
     "socket.io": "^4.7.5",
     "socket.io-client": "^4.7.5",
-    "tailwind-merge": "^2.3.0"
+    "tailwind-merge": "^2.3.0",
+    "y-monaco": "^0.1.6",
+    "y-websocket": "^3.1.0",
+    "yjs": "^13.6.32"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -30,6 +34,7 @@
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
     "postcss": "^8.4.38",
+    "puppeteer": "^25.10.0",
     "tailwindcss": "^3.4.4",
     "typescript": "^5.4.5",
     "vite": "^5.3.1"

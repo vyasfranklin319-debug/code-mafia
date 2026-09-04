@@ -149,6 +149,8 @@ export const WorkRoundPage: React.FC<WorkRoundPageProps> = ({
             onChange={(newContent) => onCodeChange(activeFile.path, newContent)}
             activePlayers={session.players.filter(p => p.isAlive)}
             readOnly={!currentUser.isAlive || session.isCodeFrozen}
+            roomCode={session.joinCode || session.id}
+            currentUser={currentUser}
           />
 
           {/* Activity Feed Bar at Bottom of Editor */}

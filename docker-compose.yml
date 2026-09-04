@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL - Durable State Storage
+  postgres:
+    image: postgres:16-alpine
+    container_name: codemafia-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: codemafia
+      POSTGRES_PASSWORD: codemafia_secret_password
+      POSTGRES_DB: codemafia_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./Backend/src/db/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codemafia -d codemafia_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Redis - Ephemeral State & Pub/Sub
+  redis:
+    image: redis:7-alpine
+    container_name: codemafia-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 3. Piston - Isolated Code Execution Engine (Air-gapped Sandbox)
+  piston:
+    image: ghcr.io/engineer-man/piston
+    container_name: codemafia-piston
+    restart: unless-stopped
+    ports:
+      - "2000:2000"
+    volumes:
+      - piston_packages:/piston/packages
+    tmpfs:
+      - /tmp:exec,size=256M
+
+  # 4. Backend Server - Node.js + Express + Yjs CRDT + Socket.IO
+  backend:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: codemafia-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: 3001
+      NODE_ENV: production
+      DATABASE_URL: postgres://codemafia:codemafia_secret_password@postgres:5432/codemafia_db
+      REDIS_URL: redis://redis:6379
+      PISTON_URL: http://piston:2000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  piston_packages:
