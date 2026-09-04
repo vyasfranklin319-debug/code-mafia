@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Mail, ArrowLeft, CheckCircle2, KeyRound, AlertCircle, Zap, Shield, UserPlus, X, LogIn, UserCheck } from 'lucide-react';
+import { apiAuthLogin, apiAuthRegister } from '../services/apiClient';
 
 interface LoginPageProps {
   onLoginSuccess: (usernameOrEmail: string) => void;
@@ -95,19 +96,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onNavigate
         } catch (e) {}
 
         // 2. Microservices Backend Login Gateway
-        const res = await fetch('http://localhost:3001/api/v1/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ usernameOrEmail: emailOrUsername.trim(), password })
-        });
-        const data = await res.json();
+        const data = await apiAuthLogin({ usernameOrEmail: emailOrUsername.trim(), password });
         setIsLoading(false);
 
-        if (res.ok && data.user) {
+        if (data.user) {
           if (data.token) localStorage.setItem('code_mafia_jwt_token', data.token);
           onLoginSuccess(data.user.username);
         } else {
-          setErrorMsg(data.error || 'Authentication failed. Please check your security password.');
+          setErrorMsg('Authentication failed. Please check your security password.');
         }
       } catch (err: any) {
         setIsLoading(false);
@@ -171,16 +167,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onNavigate
         localStorage.setItem('code_mafia_jwt_token', fbData.idToken);
       }
 
-      // 3. Sync registration to local Backend Microservices
+      // 3. Sync registration to Backend Microservices
       try {
-        await fetch('http://localhost:3001/api/v1/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: signUpEmail.trim(),
-            username: derivedUsername,
-            password: signUpPassword
-          })
+        await apiAuthRegister({
+          email: signUpEmail.trim(),
+          username: derivedUsername,
+          password: signUpPassword
         });
       } catch (e) {
         // Microservice sync fallback

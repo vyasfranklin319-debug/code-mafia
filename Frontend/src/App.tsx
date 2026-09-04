@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { GameSession, Player, GameConfig, Phase, AstReport, ReplayFrame, PrHotfix } from './types/game';
 import {
   createInitialSession,
@@ -22,6 +22,7 @@ import {
   joinRoomInRTDB,
   getRoomFromRTDB,
   updatePlayerReadyInRTDB,
+  updatePlayersInRTDB,
   leaveRoomInRTDB,
   setRoomPhaseInRTDB,
   syncSessionToRTDB,
@@ -29,7 +30,12 @@ import {
   listenToRoomInRTDB,
   castVoteInRTDB,
   clearVotesInRTDB,
-  syncFilesToRTDB
+  syncFilesToRTDB,
+  sendChatToRTDB,
+  syncTestRunToRTDB,
+  setCodeFrozenInRTDB,
+  syncSabotageToRTDB,
+  syncStagedPrsToRTDB
 } from './services/realtimeSync';
 
 import { Navbar } from './components/Navbar';
@@ -104,6 +110,11 @@ export const App: React.FC = () => {
   const [isTestRunning, setIsTestRunning] = useState(false);
   const [isNextEditShadow, setIsNextEditShadow] = useState(false);
 
+  const currentUserRef = useRef<Player | null>(currentUser);
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
   // Initialize socket listener for real-time multiplayer
   useEffect(() => {
     if (!session || !currentUser) return;
@@ -111,8 +122,6 @@ export const App: React.FC = () => {
 
     initSocketConnection(channelKey, currentUser, (event, data) => {
       if (event === 'PLAYER_JOINED') {
-        // Firestore is the authoritative source for player roster updates.
-        // WebSocket PLAYER_JOINED is a low-latency signal — only add if player data exists and not already in list.
         if (data && data.player) {
           setSession(prev => {
             if (!prev) return null;
@@ -123,13 +132,10 @@ export const App: React.FC = () => {
         }
       }
 
-      // ROOM_STATE: sent by Durable Object with full current player roster when a new player identifies
       if (event === 'ROOM_STATE') {
         if (data && Array.isArray(data.players)) {
           setSession(prev => {
             if (!prev) return null;
-            // Merge DO players list with local session players list
-            // Trust Firestore for full player objects; use ROOM_STATE for presence detection only
             return prev;
           });
         }
@@ -151,13 +157,47 @@ export const App: React.FC = () => {
         if (data && data.session) {
           setSession(data.session);
           setCurrentPhase('ROLE_REVEAL');
+          const meUser = currentUserRef.current;
+          const activeId = localStorage.getItem('code_mafia_user_id');
+          const activeName = localStorage.getItem('code_mafia_active_user');
+          const me = data.session.players?.find((p: any) =>
+            (meUser && (p.id === meUser.id || p.displayName === meUser.displayName)) ||
+            (activeId && p.id === activeId) ||
+            (activeName && p.displayName === activeName)
+          );
+          if (me && me.role) {
+            setCurrentUser(prev => prev ? { ...prev, role: me.role, isAlive: me.isAlive !== false } : {
+              id: me.id,
+              displayName: me.displayName,
+              isAlive: me.isAlive !== false,
+              isHost: me.isHost,
+              isBot: false,
+              isReady: me.isReady,
+              role: me.role,
+              avatarColor: me.avatarColor || 'bg-purple-600',
+              stats: me.stats || { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+            });
+          }
         }
       }
 
       if (event === 'PHASE_ADVANCED') {
         if (data && data.phase) {
           setCurrentPhase(data.phase);
-          if (data.session) setSession(data.session);
+          if (data.session) {
+            setSession(data.session);
+            const meUser = currentUserRef.current;
+            const activeId = localStorage.getItem('code_mafia_user_id');
+            const activeName = localStorage.getItem('code_mafia_active_user');
+            const me = data.session.players?.find((p: any) =>
+              (meUser && (p.id === meUser.id || p.displayName === meUser.displayName)) ||
+              (activeId && p.id === activeId) ||
+              (activeName && p.displayName === activeName)
+            );
+            if (me) {
+              setCurrentUser(prev => prev ? { ...prev, isAlive: me.isAlive !== false, role: me.role || prev.role } : null);
+            }
+          }
         }
       }
 
@@ -173,20 +213,29 @@ export const App: React.FC = () => {
         }
       }
 
-      if (event === 'TEST_RUN_COMPLETED') {
-        setSession(prev => {
-          if (!prev) return null;
-          const newRuns = [...prev.testRuns, data.testRunResult];
-          const updatedSession = { ...prev, testRuns: newRuns };
-          return evaluateWinConditions(updatedSession);
-        });
+      if (event === 'TEST_RUN_COMPLETED' || event === 'TRIGGER_TEST_RUN') {
+        if (data && data.testRunResult) {
+          setSession(prev => {
+            if (!prev) return null;
+            const exists = prev.testRuns.some(r => r.id === data.testRunResult.id);
+            const runs = exists ? prev.testRuns : [...prev.testRuns, data.testRunResult];
+            const integrity = data.systemIntegrity || prev.systemIntegrity;
+            const feed = data.activityEvent ? [...prev.activityFeed, data.activityEvent] : prev.activityFeed;
+            const updated = { ...prev, testRuns: runs, systemIntegrity: integrity, activityFeed: feed };
+            return evaluateWinConditions(updated);
+          });
+        }
       }
 
-      if (event === 'CHAT_RECEIVED') {
-        setSession(prev => {
-          if (!prev) return null;
-          return { ...prev, chatMessages: [...prev.chatMessages, data.message] };
-        });
+      if (event === 'CHAT_RECEIVED' || event === 'SEND_CHAT') {
+        if (data && data.message) {
+          setSession(prev => {
+            if (!prev) return null;
+            const exists = prev.chatMessages.some(m => m.id === data.message.id);
+            if (exists) return prev;
+            return { ...prev, chatMessages: [...prev.chatMessages, data.message] };
+          });
+        }
       }
 
       if (event === 'VOTE_REGISTERED' || event === 'CAST_VOTE') {
@@ -194,6 +243,46 @@ export const App: React.FC = () => {
           setSession(prev => {
             if (!prev) return null;
             return { ...prev, votes: { ...prev.votes, [data.voterId]: data.targetId } };
+          });
+        }
+      }
+
+      if (event === 'CODE_FREEZE_TOGGLED') {
+        if (data) {
+          setSession(prev => {
+            if (!prev) return null;
+            const feed = data.event ? [...prev.activityFeed, data.event] : prev.activityFeed;
+            return { ...prev, isCodeFrozen: !!data.isCodeFrozen, activityFeed: feed };
+          });
+        }
+      }
+
+      if (event === 'SABOTAGE_ACTIVATED') {
+        if (data && data.sabotageState) {
+          setSession(prev => {
+            if (!prev) return null;
+            const feed = data.event ? [...prev.activityFeed, data.event] : prev.activityFeed;
+            return { ...prev, sabotageState: data.sabotageState, activityFeed: feed };
+          });
+        }
+      }
+
+      if (event === 'PR_STAGED') {
+        if (data && data.pr) {
+          setSession(prev => {
+            if (!prev) return null;
+            const feed = data.event ? [...prev.activityFeed, data.event] : prev.activityFeed;
+            return { ...prev, stagedPrs: [...prev.stagedPrs, data.pr], activityFeed: feed };
+          });
+        }
+      }
+
+      if (event === 'AST_REPORT_SAVED') {
+        if (data && data.report) {
+          setSession(prev => {
+            if (!prev) return null;
+            const feed = data.event ? [...prev.activityFeed, data.event] : prev.activityFeed;
+            return { ...prev, astReports: [...prev.astReports, data.report], activityFeed: feed };
           });
         }
       }
@@ -207,12 +296,28 @@ export const App: React.FC = () => {
 
   // ─── REALTIME DATABASE MULTIPLAYER LISTENER ─────────────────────────────────
   // Primary multiplayer sync engine: Realtime Database with 0 quota issues,
-  // sub-100ms latency, automatic presence tracking, and synchronized code/vote state.
+  // sub-100ms latency, automatic presence tracking, and synchronized full-room state.
   useEffect(() => {
     const joinCode = session?.joinCode?.toUpperCase();
     if (!joinCode || !currentUser || !session) return;
 
-    const unsub = listenToRoomInRTDB(joinCode, ({ meta, players, files, votes }) => {
+    const unsub = listenToRoomInRTDB(joinCode, (roomData) => {
+      const {
+        meta,
+        players,
+        files,
+        votes,
+        chatMessages,
+        testRuns,
+        systemIntegrity,
+        sabotageState,
+        stagedPrs,
+        gitCommits,
+        activityFeed,
+        eliminationHistory,
+        isCodeFrozen
+      } = roomData;
+
       if (!players || players.length === 0) return;
 
       setSession(prev => {
@@ -220,20 +325,20 @@ export const App: React.FC = () => {
         let updated = { ...prev };
         let changed = false;
 
-        // 1. Sync players list
+        // 1. Sync players list (including roles and alive statuses)
         if (JSON.stringify(players) !== JSON.stringify(prev.players)) {
           updated.players = players;
           changed = true;
         }
 
-        // 2. Sync phase changes (e.g. host started game or advanced round)
+        // 2. Sync phase changes
         if (meta?.phase && meta.phase !== prev.phase) {
           updated.phase = meta.phase;
           setCurrentPhase(meta.phase as any);
           changed = true;
         }
 
-        // 3. Sync round if updated
+        // 3. Sync round
         if (meta?.currentRound && meta.currentRound !== prev.currentRound) {
           updated.currentRound = meta.currentRound;
           changed = true;
@@ -245,19 +350,29 @@ export const App: React.FC = () => {
           changed = true;
         }
 
-        // 5. Sync winner state if game finished
+        // 5. Sync winner and win reason
         if (meta?.winner !== undefined && meta.winner !== prev.winner) {
           updated.winner = meta.winner;
           changed = true;
         }
+        if (meta?.winReason !== undefined && meta.winReason !== prev.winReason) {
+          updated.winReason = meta.winReason;
+          changed = true;
+        }
 
-        // 6. Real-time Votes Sync across all players
+        // 6. Sync Code Freeze status across all players
+        if (isCodeFrozen !== undefined && isCodeFrozen !== prev.isCodeFrozen) {
+          updated.isCodeFrozen = isCodeFrozen;
+          changed = true;
+        }
+
+        // 7. Real-time Votes Sync
         if (votes && JSON.stringify(votes) !== JSON.stringify(prev.votes)) {
           updated.votes = votes;
           changed = true;
         }
 
-        // 7. Runtime Codebase Sync: propagate shared code files across all operatives
+        // 8. Runtime Codebase Sync: propagate shared code files across all operatives
         if (files && Array.isArray(files) && files.length > 0) {
           const filesDiffer = files.some(rf => {
             const local = prev.files.find(lf => lf.path === rf.path);
@@ -269,19 +384,98 @@ export const App: React.FC = () => {
           }
         }
 
+        // 9. Chat Messages Sync
+        if (chatMessages && Array.isArray(chatMessages) && chatMessages.length > prev.chatMessages.length) {
+          updated.chatMessages = chatMessages;
+          changed = true;
+        }
+
+        // 10. Test Runs Sync
+        if (testRuns && Array.isArray(testRuns) && testRuns.length > prev.testRuns.length) {
+          updated.testRuns = testRuns;
+          changed = true;
+        }
+
+        // 11. System Integrity Gauge Sync
+        if (systemIntegrity && systemIntegrity.score !== prev.systemIntegrity?.score) {
+          updated.systemIntegrity = systemIntegrity;
+          changed = true;
+        }
+
+        // 12. Sabotage State Sync
+        if (sabotageState && JSON.stringify(sabotageState) !== JSON.stringify(prev.sabotageState)) {
+          updated.sabotageState = sabotageState;
+          changed = true;
+        }
+
+        // 13. Staged PRs Sync
+        if (stagedPrs && Array.isArray(stagedPrs) && stagedPrs.length !== prev.stagedPrs.length) {
+          updated.stagedPrs = stagedPrs;
+          changed = true;
+        }
+
+        // 14. Activity Feed Timeline Sync
+        if (activityFeed && Array.isArray(activityFeed) && activityFeed.length > prev.activityFeed.length) {
+          updated.activityFeed = activityFeed;
+          changed = true;
+        }
+
+        // 15. Git Commits Audit Trail Sync
+        if (gitCommits && Array.isArray(gitCommits) && gitCommits.length > prev.gitCommits.length) {
+          updated.gitCommits = gitCommits;
+          changed = true;
+        }
+
+        // 16. Elimination History Sync
+        if (eliminationHistory && Array.isArray(eliminationHistory) && eliminationHistory.length > prev.eliminationHistory.length) {
+          updated.eliminationHistory = eliminationHistory;
+          changed = true;
+        }
+
         return changed ? updated : prev;
       });
 
-      // Sync currentUser host and ready flags
-      setCurrentUser(prev => {
-        if (!prev) return prev;
-        const me = players.find(p => p.id === prev.id || p.displayName === prev.displayName);
-        if (!me) return prev;
-        if (me.isHost !== prev.isHost || me.isReady !== prev.isReady || me.isAlive !== prev.isAlive) {
-          return { ...prev, isHost: me.isHost, isReady: me.isReady, isAlive: me.isAlive };
-        }
-        return prev;
-      });
+      // Sync currentUser host, ready, alive, and assigned role
+      const meUser = currentUserRef.current;
+      const activeId = localStorage.getItem('code_mafia_user_id');
+      const activeName = localStorage.getItem('code_mafia_active_user');
+      const me = players.find(p =>
+        (meUser && (p.id === meUser.id || p.displayName === meUser.displayName)) ||
+        (activeId && p.id === activeId) ||
+        (activeName && p.displayName === activeName)
+      );
+      if (me) {
+        setCurrentUser(prev => {
+          if (!prev) {
+            return {
+              id: me.id,
+              displayName: me.displayName,
+              isAlive: me.isAlive !== false,
+              isHost: me.isHost,
+              isBot: false,
+              isReady: me.isReady,
+              role: me.role,
+              avatarColor: me.avatarColor || 'bg-purple-600',
+              stats: me.stats || { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+            };
+          }
+          if (
+            me.isHost !== prev.isHost ||
+            me.isReady !== prev.isReady ||
+            me.isAlive !== prev.isAlive ||
+            (me.role && me.role !== prev.role)
+          ) {
+            return {
+              ...prev,
+              isHost: me.isHost,
+              isReady: me.isReady,
+              isAlive: me.isAlive,
+              role: me.role || prev.role
+            };
+          }
+          return prev;
+        });
+      }
     });
 
     return () => unsub();
@@ -440,8 +634,18 @@ export const App: React.FC = () => {
           phaseEndsAt: rtdbRoom.meta.phaseEndsAt || 0,
           currentRound: rtdbRoom.meta.currentRound || 1,
           winner: rtdbRoom.meta.winner || null,
+          winReason: rtdbRoom.meta.winReason || null,
+          isCodeFrozen: !!rtdbRoom.isCodeFrozen,
           files: (rtdbRoom.files && Array.isArray(rtdbRoom.files) && rtdbRoom.files.length > 0) ? rtdbRoom.files : base.files,
           votes: rtdbRoom.votes || {},
+          chatMessages: (rtdbRoom.chatMessages && Array.isArray(rtdbRoom.chatMessages)) ? rtdbRoom.chatMessages : base.chatMessages,
+          testRuns: (rtdbRoom.testRuns && Array.isArray(rtdbRoom.testRuns)) ? rtdbRoom.testRuns : base.testRuns,
+          systemIntegrity: rtdbRoom.systemIntegrity || base.systemIntegrity,
+          sabotageState: rtdbRoom.sabotageState || base.sabotageState,
+          stagedPrs: (rtdbRoom.stagedPrs && Array.isArray(rtdbRoom.stagedPrs)) ? rtdbRoom.stagedPrs : base.stagedPrs,
+          gitCommits: (rtdbRoom.gitCommits && Array.isArray(rtdbRoom.gitCommits)) ? rtdbRoom.gitCommits : base.gitCommits,
+          activityFeed: (rtdbRoom.activityFeed && Array.isArray(rtdbRoom.activityFeed)) ? rtdbRoom.activityFeed : base.activityFeed,
+          eliminationHistory: (rtdbRoom.eliminationHistory && Array.isArray(rtdbRoom.eliminationHistory)) ? rtdbRoom.eliminationHistory : base.eliminationHistory,
           hostName,
           players: updatedPlayers
         };
@@ -644,8 +848,9 @@ export const App: React.FC = () => {
 
     const channelKey = (session.joinCode || session.id).toUpperCase();
 
-    // PRIMARY SYNC: Broadcast phase transition in RTDB with authoritative timer
+    // PRIMARY SYNC: Broadcast phase transition in RTDB with authoritative timer and assigned player roles
     if (session.joinCode) {
+      await updatePlayersInRTDB(session.joinCode, sessionWithRoles.players);
       await setRoomPhaseInRTDB(session.joinCode, 'ROLE_REVEAL', { phaseEndsAt: sessionWithRoles.phaseEndsAt });
       await syncSessionToRTDB(sessionWithRoles);
     }
@@ -747,7 +952,7 @@ export const App: React.FC = () => {
   };
 
   // Handler: Stage PR Hotfix to Staging Branch
-  const handleStagePrHotfix = () => {
+  const handleStagePrHotfix = async () => {
     if (!session || !currentUser) return;
     const primaryFile = session.files[0];
     if (!primaryFile) return;
@@ -768,33 +973,75 @@ export const App: React.FC = () => {
       details: `Staged PR #${pr.prNumber} for ${primaryFile.name}`
     };
 
+    const updatedPrs = [...session.stagedPrs, pr];
+    const updatedFeed = [...session.activityFeed, prEvent];
+
     setSession({
       ...session,
-      stagedPrs: [...session.stagedPrs, pr],
-      activityFeed: [...session.activityFeed, prEvent]
+      stagedPrs: updatedPrs,
+      activityFeed: updatedFeed
     });
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await syncStagedPrsToRTDB(session.joinCode, updatedPrs, updatedFeed);
+    }
+    emitMultiplayerEvent('PR_STAGED', { roomId: channelKey, pr, event: prEvent });
   };
 
   // Handler: Activate Mafia Covert Memory Leak
-  const handleActivateMemoryLeak = () => {
+  const handleActivateMemoryLeak = async () => {
     if (!session || !currentUser || currentUser.role !== 'MAFIA') return;
-    setSession(activateMemoryLeak(session));
+    const newSession = activateMemoryLeak(session);
+    setSession(newSession);
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await syncSabotageToRTDB(session.joinCode, newSession.sabotageState, newSession.activityFeed);
+    }
+    emitMultiplayerEvent('SABOTAGE_ACTIVATED', {
+      roomId: channelKey,
+      sabotageState: newSession.sabotageState,
+      event: newSession.activityFeed[newSession.activityFeed.length - 1]
+    });
   };
 
   // Handler: Activate Mafia Covert Silent Regression
-  const handleActivateSilentRegression = () => {
+  const handleActivateSilentRegression = async () => {
     if (!session || !currentUser || currentUser.role !== 'MAFIA') return;
-    setSession(activateSilentRegression(session));
+    const newSession = activateSilentRegression(session);
+    setSession(newSession);
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await syncSabotageToRTDB(session.joinCode, newSession.sabotageState, newSession.activityFeed);
+    }
+    emitMultiplayerEvent('SABOTAGE_ACTIVATED', {
+      roomId: channelKey,
+      sabotageState: newSession.sabotageState,
+      event: newSession.activityFeed[newSession.activityFeed.length - 1]
+    });
   };
 
   // Handler: Activate Mafia Covert Syntax Masking
-  const handleActivateSyntaxMasking = (targetPlayer: Player) => {
+  const handleActivateSyntaxMasking = async (targetPlayer: Player) => {
     if (!session || !currentUser || currentUser.role !== 'MAFIA') return;
-    setSession(activateSyntaxMasking(session, targetPlayer));
+    const newSession = activateSyntaxMasking(session, targetPlayer);
+    setSession(newSession);
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await syncSabotageToRTDB(session.joinCode, newSession.sabotageState, newSession.activityFeed);
+    }
+    emitMultiplayerEvent('SABOTAGE_ACTIVATED', {
+      roomId: channelKey,
+      sabotageState: newSession.sabotageState,
+      event: newSession.activityFeed[newSession.activityFeed.length - 1]
+    });
   };
 
   // Handler: Emergency Call Code Freeze
-  const handleTriggerCodeFreeze = () => {
+  const handleTriggerCodeFreeze = async () => {
     if (!session || !currentUser) return;
     const freezeEvent = {
       id: `freeze-${Date.now()}`,
@@ -805,10 +1052,22 @@ export const App: React.FC = () => {
       details: `Emergency Code Freeze called by ${currentUser.displayName}! Editor locked for incident review.`
     };
 
+    const updatedFeed = [...session.activityFeed, freezeEvent];
+
     setSession({
       ...session,
       isCodeFrozen: true,
-      activityFeed: [...session.activityFeed, freezeEvent]
+      activityFeed: updatedFeed
+    });
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await setCodeFrozenInRTDB(session.joinCode, true, updatedFeed);
+    }
+    emitMultiplayerEvent('CODE_FREEZE_TOGGLED', {
+      roomId: channelKey,
+      isCodeFrozen: true,
+      event: freezeEvent
     });
   };
 
@@ -828,7 +1087,7 @@ export const App: React.FC = () => {
   };
 
   // Handler: Trigger Mafia Fake CI Status Inversion
-  const handleTriggerFakeCi = () => {
+  const handleTriggerFakeCi = async () => {
     if (!session || !currentUser || currentUser.role !== 'MAFIA') return;
 
     const activeUntil = Date.now() + 15000;
@@ -841,18 +1100,31 @@ export const App: React.FC = () => {
       details: 'Fake CI Status Inversion activated for 15 seconds!'
     };
 
+    const updatedSabotage = {
+      ...session.sabotageState,
+      fakeCiActiveUntil: activeUntil
+    };
+    const updatedFeed = [...session.activityFeed, sabotageEvent];
+
     setSession({
       ...session,
-      sabotageState: {
-        ...session.sabotageState,
-        fakeCiActiveUntil: activeUntil
-      },
-      activityFeed: [...session.activityFeed, sabotageEvent]
+      sabotageState: updatedSabotage,
+      activityFeed: updatedFeed
+    });
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await syncSabotageToRTDB(session.joinCode, updatedSabotage, updatedFeed);
+    }
+    emitMultiplayerEvent('SABOTAGE_ACTIVATED', {
+      roomId: channelKey,
+      sabotageState: updatedSabotage,
+      event: sabotageEvent
     });
   };
 
   // Handler: Inject Flaky Regression Trap
-  const handleInjectFlakyTest = () => {
+  const handleInjectFlakyTest = async () => {
     if (!session || !currentUser || currentUser.role !== 'MAFIA') return;
     if (session.sabotageState.flakyTestInjected) return;
 
@@ -865,17 +1137,29 @@ export const App: React.FC = () => {
     };
 
     const updatedSuite = [...session.contentPack.testSuite, flakyTestCase];
+    const updatedSabotage = {
+      ...session.sabotageState,
+      flakyTestInjected: true
+    };
 
-    setSession({
+    const updatedSession = {
       ...session,
       contentPack: {
         ...session.contentPack,
         testSuite: updatedSuite
       },
-      sabotageState: {
-        ...session.sabotageState,
-        flakyTestInjected: true
-      }
+      sabotageState: updatedSabotage
+    };
+
+    setSession(updatedSession);
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await syncSabotageToRTDB(session.joinCode, updatedSabotage, session.activityFeed);
+    }
+    emitMultiplayerEvent('SABOTAGE_ACTIVATED', {
+      roomId: channelKey,
+      sabotageState: updatedSabotage
     });
   };
 
@@ -896,6 +1180,9 @@ export const App: React.FC = () => {
       astReports: [...session.astReports, report],
       activityFeed: [...session.activityFeed, scanEvent]
     });
+
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    emitMultiplayerEvent('AST_REPORT_SAVED', { roomId: channelKey, report, event: scanEvent });
   };
 
   // Handler: Run Unit Test Suite & Update System Integrity
@@ -957,14 +1244,30 @@ export const App: React.FC = () => {
       setCurrentPhase('RESULTS');
     }
 
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await syncTestRunToRTDB(session.joinCode, evaluatedSession.testRuns, updatedIntegrity, evaluatedSession.activityFeed);
+      if (evaluatedSession.phase === 'RESULTS') {
+        await syncSessionToRTDB(evaluatedSession);
+      }
+    }
+
     emitMultiplayerEvent('TRIGGER_TEST_RUN', {
-      roomId: session.id,
-      testRunResult
+      roomId: channelKey,
+      testRunResult,
+      systemIntegrity: updatedIntegrity,
+      activityEvent: runEvent
+    });
+    emitMultiplayerEvent('TEST_RUN_COMPLETED', {
+      roomId: channelKey,
+      testRunResult,
+      systemIntegrity: updatedIntegrity,
+      activityEvent: runEvent
     });
   };
 
   // Handler: Send Chat
-  const handleSendMessage = (text: string, isMafiaOnly?: boolean) => {
+  const handleSendMessage = async (text: string, isMafiaOnly?: boolean) => {
     if (!session || !currentUser) return;
     const msg = {
       id: `msg-${Date.now()}`,
@@ -975,12 +1278,20 @@ export const App: React.FC = () => {
       isMafiaOnly
     };
 
+    const updatedMessages = [...session.chatMessages, msg];
+
     setSession({
       ...session,
-      chatMessages: [...session.chatMessages, msg]
+      chatMessages: updatedMessages
     });
 
-    emitMultiplayerEvent('SEND_CHAT', { roomId: session.id, message: msg });
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await sendChatToRTDB(session.joinCode, msg, updatedMessages);
+    }
+
+    emitMultiplayerEvent('SEND_CHAT', { roomId: channelKey, message: msg });
+    emitMultiplayerEvent('CHAT_RECEIVED', { roomId: channelKey, message: msg });
   };
 
   // Handler: Advance to Discussion
@@ -1062,7 +1373,12 @@ export const App: React.FC = () => {
     setCurrentPhase(elimSession.phase);
     const channelKey = (session.joinCode || session.id).toUpperCase();
     if (session.joinCode) {
-      await setRoomPhaseInRTDB(session.joinCode, elimSession.phase, { phaseEndsAt: elimSession.phaseEndsAt });
+      await updatePlayersInRTDB(session.joinCode, elimSession.players);
+      await setRoomPhaseInRTDB(session.joinCode, elimSession.phase, {
+        phaseEndsAt: elimSession.phaseEndsAt,
+        winner: elimSession.winner || null,
+        winReason: elimSession.winReason || null
+      });
       await syncSessionToRTDB(elimSession);
     }
     emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: elimSession.phase, session: elimSession });

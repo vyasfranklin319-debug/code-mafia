@@ -6,11 +6,24 @@
  * - Sub-100ms sync latency
  * - Built-in onDisconnect presence cleanup
  * - Universal client sync for: Host, Joiners, Matchmaking Scanner
+ * - Complete state replication: Roles, Codebase, Test Runs, Sabotage, Chat, Votes, Timers
  */
 
 import { getDatabase, ref, set, get, onValue, off, remove, onDisconnect, update } from 'firebase/database';
 import { app } from '../config/firebase';
-import { GameSession, Player } from '../types/game';
+import {
+  GameSession,
+  Player,
+  ContentFile,
+  ChatMessage,
+  TestRunResult,
+  SystemIntegrity,
+  SabotageState,
+  PrHotfix,
+  GitCommit,
+  ActivityEvent,
+  EliminationRecord
+} from '../types/game';
 
 const db = getDatabase(app);
 
@@ -24,13 +37,39 @@ export interface RTDBRoomData {
     hostName: string;
     config?: any;
     winner?: string | null;
+    winReason?: string | null;
+    isCodeFrozen?: boolean;
     playersCount?: number;
     updatedAt: number;
     createdAt: number;
   };
   players: Record<string, Player>;
-  files?: any[];
+  files?: ContentFile[];
   votes?: Record<string, string | null>;
+  chatMessages?: ChatMessage[];
+  testRuns?: TestRunResult[];
+  systemIntegrity?: SystemIntegrity;
+  sabotageState?: SabotageState;
+  stagedPrs?: PrHotfix[];
+  gitCommits?: GitCommit[];
+  activityFeed?: ActivityEvent[];
+  eliminationHistory?: EliminationRecord[];
+}
+
+export interface RTDBRoomUpdatePayload {
+  meta: any;
+  players: Player[];
+  files?: ContentFile[] | null;
+  votes?: Record<string, string | null>;
+  chatMessages?: ChatMessage[] | null;
+  testRuns?: TestRunResult[] | null;
+  systemIntegrity?: SystemIntegrity | null;
+  sabotageState?: SabotageState | null;
+  stagedPrs?: PrHotfix[] | null;
+  gitCommits?: GitCommit[] | null;
+  activityFeed?: ActivityEvent[] | null;
+  eliminationHistory?: EliminationRecord[] | null;
+  isCodeFrozen?: boolean;
 }
 
 /**
@@ -51,6 +90,8 @@ export async function saveRoomToRTDB(session: GameSession): Promise<void> {
     hostName: hostPlayer?.displayName || session.hostName || 'OperativeHost',
     config: session.config || null,
     winner: session.winner || null,
+    winReason: session.winReason || null,
+    isCodeFrozen: !!session.isCodeFrozen,
     playersCount: session.players.length,
     updatedAt: Date.now(),
     createdAt: Date.now()
@@ -61,6 +102,7 @@ export async function saveRoomToRTDB(session: GameSession): Promise<void> {
     playersMap[p.id] = {
       id: p.id,
       displayName: p.displayName,
+      role: p.role || null,
       isHost: p.isHost,
       isReady: p.isReady,
       isAlive: p.isAlive,
@@ -75,7 +117,15 @@ export async function saveRoomToRTDB(session: GameSession): Promise<void> {
     meta,
     players: playersMap,
     files: session.files || [],
-    votes: session.votes || {}
+    votes: session.votes || {},
+    chatMessages: session.chatMessages || [],
+    testRuns: session.testRuns || [],
+    systemIntegrity: session.systemIntegrity || { score: 100, pipelineStatus: 'STAGING', buildDurationMs: 850, lastUpdated: '' },
+    sabotageState: session.sabotageState || { shadowCommitsRemaining: 1, fakeCiActiveUntil: null, flakyTestInjected: false, memoryLeakActive: false, silentRegressionActive: false, syntaxMaskedPlayerId: null },
+    stagedPrs: session.stagedPrs || [],
+    gitCommits: session.gitCommits || [],
+    activityFeed: session.activityFeed || [],
+    eliminationHistory: session.eliminationHistory || []
   });
 
   // Setup disconnect handler for host
@@ -84,7 +134,7 @@ export async function saveRoomToRTDB(session: GameSession): Promise<void> {
     onDisconnect(hostRef).remove();
   }
 
-  console.log('[RTDB] Room created:', cleanCode);
+  console.log('[RTDB] Room created with full state replication:', cleanCode);
 }
 
 /**
@@ -97,6 +147,7 @@ export async function joinRoomInRTDB(joinCode: string, player: Player): Promise<
   const entry = {
     id: player.id,
     displayName: player.displayName,
+    role: player.role || null,
     isHost: player.isHost,
     isReady: player.isReady,
     isAlive: player.isAlive,
@@ -117,9 +168,34 @@ export async function joinRoomInRTDB(joinCode: string, player: Player): Promise<
 }
 
 /**
+ * Update full player roster in RTDB (for role assignments and elimination outcomes).
+ */
+export async function updatePlayersInRTDB(joinCode: string, players: Player[]): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const playersRef = ref(db, 'rooms/' + cleanCode + '/players');
+  const map: Record<string, any> = {};
+  players.forEach(p => {
+    map[p.id] = {
+      id: p.id,
+      displayName: p.displayName,
+      role: p.role || null,
+      isHost: p.isHost || false,
+      isReady: p.isReady || false,
+      isAlive: p.isAlive !== false,
+      isBot: false,
+      avatarColor: p.avatarColor || 'bg-purple-600',
+      stats: p.stats || { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+    };
+  });
+  await set(playersRef, map);
+  const metaUpdatedRef = ref(db, 'rooms/' + cleanCode + '/meta/updatedAt');
+  await set(metaUpdatedRef, Date.now());
+}
+
+/**
  * Fetch a room from RTDB by join code or ID.
  */
-export async function getRoomFromRTDB(pinOrCode: string): Promise<{ meta: any; players: Player[]; files?: any[] | null; votes?: Record<string, string | null> } | null> {
+export async function getRoomFromRTDB(pinOrCode: string): Promise<RTDBRoomUpdatePayload | null> {
   if (!pinOrCode) return null;
   const cleanCode = pinOrCode.trim().toUpperCase();
   const roomRef = ref(db, 'rooms/' + cleanCode);
@@ -133,6 +209,7 @@ export async function getRoomFromRTDB(pinOrCode: string): Promise<{ meta: any; p
     const players: Player[] = Object.values(rawPlayers).map((p: any) => ({
       id: p.id,
       displayName: p.displayName,
+      role: p.role || undefined,
       isHost: p.isHost || false,
       isReady: p.isReady || false,
       isAlive: p.isAlive !== false,
@@ -151,7 +228,16 @@ export async function getRoomFromRTDB(pinOrCode: string): Promise<{ meta: any; p
       meta: val.meta || {},
       players,
       files: val.files || null,
-      votes: parsedVotes
+      votes: parsedVotes,
+      chatMessages: val.chatMessages || null,
+      testRuns: val.testRuns || null,
+      systemIntegrity: val.systemIntegrity || null,
+      sabotageState: val.sabotageState || null,
+      stagedPrs: val.stagedPrs || null,
+      gitCommits: val.gitCommits || null,
+      activityFeed: val.activityFeed || null,
+      eliminationHistory: val.eliminationHistory || null,
+      isCodeFrozen: !!val.meta?.isCodeFrozen
     };
   } catch (err: any) {
     console.warn('[RTDB] getRoomFromRTDB error:', err.message);
@@ -191,7 +277,7 @@ export async function setRoomPhaseInRTDB(joinCode: string, phase: string, extraM
 }
 
 /**
- * Sync in-game session updates (e.g., active code, test runs, round info, phase timer) to RTDB.
+ * Sync in-game session updates (active code, test runs, round info, phase timer, sabotage) to RTDB.
  */
 export async function syncSessionToRTDB(session: GameSession): Promise<void> {
   const cleanCode = (session.joinCode || session.id).trim().toUpperCase();
@@ -202,6 +288,8 @@ export async function syncSessionToRTDB(session: GameSession): Promise<void> {
       'meta/currentRound': session.currentRound,
       'meta/phaseEndsAt': session.phaseEndsAt || 0,
       'meta/winner': session.winner || null,
+      'meta/winReason': session.winReason || null,
+      'meta/isCodeFrozen': !!session.isCodeFrozen,
       'meta/updatedAt': Date.now()
     };
     if (session.files && session.files.length > 0) {
@@ -210,7 +298,50 @@ export async function syncSessionToRTDB(session: GameSession): Promise<void> {
     if (session.votes) {
       updates['votes'] = session.votes;
     }
+    if (session.testRuns) {
+      updates['testRuns'] = session.testRuns;
+    }
+    if (session.systemIntegrity) {
+      updates['systemIntegrity'] = session.systemIntegrity;
+    }
+    if (session.sabotageState) {
+      updates['sabotageState'] = session.sabotageState;
+    }
+    if (session.stagedPrs) {
+      updates['stagedPrs'] = session.stagedPrs;
+    }
+    if (session.chatMessages) {
+      updates['chatMessages'] = session.chatMessages;
+    }
+    if (session.activityFeed) {
+      updates['activityFeed'] = session.activityFeed;
+    }
+    if (session.gitCommits) {
+      updates['gitCommits'] = session.gitCommits;
+    }
+    if (session.eliminationHistory) {
+      updates['eliminationHistory'] = session.eliminationHistory;
+    }
     await update(roomRef, updates);
+
+    // Sync player roles and statuses
+    if (session.players && session.players.length > 0) {
+      const playersMap: Record<string, any> = {};
+      session.players.forEach(p => {
+        playersMap[p.id] = {
+          id: p.id,
+          displayName: p.displayName,
+          role: p.role || null,
+          isHost: p.isHost || false,
+          isReady: p.isReady || false,
+          isAlive: p.isAlive !== false,
+          isBot: false,
+          avatarColor: p.avatarColor || 'bg-purple-600',
+          stats: p.stats || { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+        };
+      });
+      await update(ref(db, 'rooms/' + cleanCode), { players: playersMap });
+    }
   } catch (e: any) {
     console.warn('[RTDB] syncSessionToRTDB error:', e.message);
   }
@@ -224,7 +355,6 @@ export async function castVoteInRTDB(joinCode: string, voterId: string, targetId
   const voteRef = ref(db, 'rooms/' + cleanCode + '/votes/' + voterId);
   await set(voteRef, targetId === null ? '__ABSTAIN__' : targetId);
 
-  // Touch room updatedAt to notify listeners
   const metaUpdatedRef = ref(db, 'rooms/' + cleanCode + '/meta/updatedAt');
   await set(metaUpdatedRef, Date.now());
 }
@@ -244,13 +374,78 @@ export async function clearVotesInRTDB(joinCode: string): Promise<void> {
 /**
  * Push updated codebase files to RTDB so all players have access to runtime code.
  */
-export async function syncFilesToRTDB(joinCode: string, files: any[]): Promise<void> {
+export async function syncFilesToRTDB(joinCode: string, files: ContentFile[]): Promise<void> {
   const cleanCode = joinCode.trim().toUpperCase();
   const filesRef = ref(db, 'rooms/' + cleanCode + '/files');
   await set(filesRef, files);
 
   const metaUpdatedRef = ref(db, 'rooms/' + cleanCode + '/meta/updatedAt');
   await set(metaUpdatedRef, Date.now());
+}
+
+/**
+ * Push a new chat message to RTDB.
+ */
+export async function sendChatToRTDB(joinCode: string, message: ChatMessage, allMessages: ChatMessage[]): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const chatRef = ref(db, 'rooms/' + cleanCode + '/chatMessages');
+  await set(chatRef, allMessages);
+
+  const metaUpdatedRef = ref(db, 'rooms/' + cleanCode + '/meta/updatedAt');
+  await set(metaUpdatedRef, Date.now());
+}
+
+/**
+ * Synchronize Test Run and System Integrity Score to RTDB.
+ */
+export async function syncTestRunToRTDB(joinCode: string, testRuns: TestRunResult[], systemIntegrity: SystemIntegrity, activityFeed: ActivityEvent[]): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const roomRef = ref(db, 'rooms/' + cleanCode);
+  await update(roomRef, {
+    testRuns,
+    systemIntegrity,
+    activityFeed,
+    'meta/updatedAt': Date.now()
+  });
+}
+
+/**
+ * Synchronize Emergency Code Freeze status to RTDB.
+ */
+export async function setCodeFrozenInRTDB(joinCode: string, isCodeFrozen: boolean, activityFeed: ActivityEvent[]): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const roomRef = ref(db, 'rooms/' + cleanCode);
+  await update(roomRef, {
+    'meta/isCodeFrozen': isCodeFrozen,
+    activityFeed,
+    'meta/updatedAt': Date.now()
+  });
+}
+
+/**
+ * Synchronize Mafia Sabotage State to RTDB.
+ */
+export async function syncSabotageToRTDB(joinCode: string, sabotageState: SabotageState, activityFeed: ActivityEvent[]): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const roomRef = ref(db, 'rooms/' + cleanCode);
+  await update(roomRef, {
+    sabotageState,
+    activityFeed,
+    'meta/updatedAt': Date.now()
+  });
+}
+
+/**
+ * Synchronize Staged PRs to RTDB.
+ */
+export async function syncStagedPrsToRTDB(joinCode: string, stagedPrs: PrHotfix[], activityFeed: ActivityEvent[]): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const roomRef = ref(db, 'rooms/' + cleanCode);
+  await update(roomRef, {
+    stagedPrs,
+    activityFeed,
+    'meta/updatedAt': Date.now()
+  });
 }
 
 /**
@@ -291,12 +486,12 @@ export async function findGlobalOpenSessionFromRTDB(): Promise<{ joinCode: strin
 }
 
 /**
- * Real-time listener for the entire room (players, meta, files, and votes) in RTDB.
+ * Real-time listener for the entire room (players, meta, files, votes, chat, tests, sabotage) in RTDB.
  * Returns unsubscribe function.
  */
 export function listenToRoomInRTDB(
   joinCode: string,
-  onUpdate: (roomData: { meta: any; players: Player[]; files?: any[] | null; votes?: Record<string, string | null> }) => void
+  onUpdate: (roomData: RTDBRoomUpdatePayload) => void
 ): () => void {
   const cleanCode = joinCode.trim().toUpperCase();
   const roomRef = ref(db, 'rooms/' + cleanCode);
@@ -310,6 +505,7 @@ export function listenToRoomInRTDB(
     const players: Player[] = Object.values(rawPlayers).map((p: any) => ({
       id: p.id,
       displayName: p.displayName,
+      role: p.role || undefined,
       isHost: p.isHost || false,
       isReady: p.isReady || false,
       isAlive: p.isAlive !== false,
@@ -332,7 +528,16 @@ export function listenToRoomInRTDB(
       meta: val.meta || {},
       players,
       files: val.files || null,
-      votes: parsedVotes
+      votes: parsedVotes,
+      chatMessages: val.chatMessages || null,
+      testRuns: val.testRuns || null,
+      systemIntegrity: val.systemIntegrity || null,
+      sabotageState: val.sabotageState || null,
+      stagedPrs: val.stagedPrs || null,
+      gitCommits: val.gitCommits || null,
+      activityFeed: val.activityFeed || null,
+      eliminationHistory: val.eliminationHistory || null,
+      isCodeFrozen: !!val.meta?.isCodeFrozen
     });
   }, (err: Error) => {
     console.warn('[RTDB] Room listener error:', err.message);

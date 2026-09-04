@@ -3,6 +3,7 @@ import { GameSession, GameHistoryItem } from '../types/game';
 import { ReplayEngine } from '../components/ReplayEngine';
 import { Trophy, Skull, RotateCcw, Home, Award, PlayCircle, Sparkles } from 'lucide-react';
 import { allContentPacks } from '../contentPacks';
+import { apiSaveMatchHistory } from '../services/apiClient';
 
 interface ResultsPageProps {
   session: GameSession;
@@ -38,11 +39,7 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
     };
 
     // 1. Post to backend API
-    fetch('http://localhost:3001/api/v1/history', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(historyRecord)
-    }).catch(err => console.warn('Could not post match to backend API history store', err));
+    apiSaveMatchHistory(historyRecord).catch(err => console.warn('Could not post match to backend API history store', err));
 
     // 2. Save to local storage history array
     try {

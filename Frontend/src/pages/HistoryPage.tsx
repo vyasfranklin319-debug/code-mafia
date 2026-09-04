@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { GameHistoryItem } from '../types/game';
 import { History, Download, ArrowLeft, Search, Trophy, ShieldAlert, Sparkles, RefreshCw } from 'lucide-react';
+import { apiFetchMatchHistory } from '../services/apiClient';
 
 interface HistoryPageProps {
   onBack: () => void;
@@ -16,9 +17,9 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({ onBack }) => {
     setIsLoading(true);
     let items: GameHistoryItem[] = [];
     try {
-      const res = await fetch('http://localhost:3001/api/v1/history');
-      if (res.ok) {
-        items = await res.json();
+      const apiItems = await apiFetchMatchHistory();
+      if (Array.isArray(apiItems) && apiItems.length > 0) {
+        items = apiItems;
       }
     } catch (e) {
       console.warn('Backend API offline, attempting Firestore query.');

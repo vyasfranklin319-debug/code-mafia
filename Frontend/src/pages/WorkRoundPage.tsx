@@ -54,6 +54,13 @@ export const WorkRoundPage: React.FC<WorkRoundPageProps> = ({
   const [mobileTab, setMobileTab] = useState<'editor' | 'tests' | 'blame' | 'prs' | 'chat'>('editor');
   const [showAstModal, setShowAstModal] = useState(false);
   const [showCodeFreeze, setShowCodeFreeze] = useState(session.isCodeFrozen);
+  const [isFreezeDismissed, setIsFreezeDismissed] = useState(false);
+
+  React.useEffect(() => {
+    if (session.isCodeFrozen) {
+      setIsFreezeDismissed(false);
+    }
+  }, [session.isCodeFrozen]);
 
   const activeFile = session.files.find(f => f.path === activeFilePath) || session.files[0];
   const latestRun = session.testRuns[session.testRuns.length - 1] || null;
@@ -207,11 +214,14 @@ export const WorkRoundPage: React.FC<WorkRoundPageProps> = ({
       )}
 
       {/* Code Freeze Incident Review Modal */}
-      {(showCodeFreeze || session.isCodeFrozen) && (
+      {(!isFreezeDismissed && (showCodeFreeze || session.isCodeFrozen)) && (
         <CodeFreezeModal
           session={session}
           currentUser={currentUser}
-          onClose={() => setShowCodeFreeze(false)}
+          onClose={() => {
+            setIsFreezeDismissed(true);
+            setShowCodeFreeze(false);
+          }}
           onAdvanceToVoting={onAdvanceToDiscussion}
         />
       )}
