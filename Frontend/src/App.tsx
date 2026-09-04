@@ -53,6 +53,16 @@ import { AdminPacksPage } from './pages/AdminPacksPage';
 import { LoginPage } from './pages/LoginPage';
 import { DeveloperJourneyDashboard } from './pages/DeveloperJourneyDashboard';
 
+function getSessionUserId(forceNew = false): string {
+  if (typeof window === 'undefined') return `usr-${Date.now()}`;
+  let id = sessionStorage.getItem('code_mafia_user_id');
+  if (!id || forceNew) {
+    id = `usr-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    sessionStorage.setItem('code_mafia_user_id', id);
+  }
+  return id;
+}
+
 export const App: React.FC = () => {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [currentPhase, setCurrentPhase] = useState<Phase>('LOGIN');
@@ -75,12 +85,7 @@ export const App: React.FC = () => {
     try {
       const savedUser = localStorage.getItem('code_mafia_active_user');
       if (savedUser) {
-        // FIX BUG 4: Reuse stable persisted ID so it never changes across refreshes
-        let stableId = localStorage.getItem('code_mafia_user_id');
-        if (!stableId) {
-          stableId = `usr-${Date.now()}`;
-          localStorage.setItem('code_mafia_user_id', stableId);
-        }
+        const stableId = getSessionUserId();
         return {
           id: stableId,
           displayName: savedUser,
@@ -518,11 +523,7 @@ export const App: React.FC = () => {
     // Pre-generate a 6-character stable PIN
     const stableJoinCode = Math.random().toString(36).substring(2, 8).toUpperCase();
 
-    let stableUserId = localStorage.getItem('code_mafia_user_id');
-    if (!stableUserId) {
-      stableUserId = `usr-${Date.now()}`;
-      localStorage.setItem('code_mafia_user_id', stableUserId);
-    }
+    const stableUserId = currentUser?.id || getSessionUserId();
 
     const hostPlayer: Player = {
       id: stableUserId,
@@ -573,12 +574,7 @@ export const App: React.FC = () => {
   const handleJoinByPin = async (pinCode: string) => {
     const activeUserName = currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
     const cleanPin = pinCode.trim().toUpperCase();
-
-    let stableUserId = localStorage.getItem('code_mafia_user_id');
-    if (!stableUserId) {
-      stableUserId = `usr-${Date.now()}`;
-      localStorage.setItem('code_mafia_user_id', stableUserId);
-    }
+    const stableUserId = currentUser?.id || getSessionUserId();
 
     try {
       // 1. PRIMARY LOOKUP: Check Realtime Database first (zero quota issues, instant response)
@@ -1449,8 +1445,9 @@ export const App: React.FC = () => {
             onLoginSuccess={(username) => {
               const cleanName = username.includes('@') ? username.split('@')[0] : username;
               localStorage.setItem('code_mafia_active_user', cleanName);
+              const newId = getSessionUserId(true);
               const updatedUser = {
-                id: `usr-${Date.now()}`,
+                id: newId,
                 displayName: cleanName,
                 isAlive: true,
                 isHost: false,

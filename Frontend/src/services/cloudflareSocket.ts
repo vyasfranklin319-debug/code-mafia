@@ -33,9 +33,9 @@ class CloudflareSocket {
   public id = `cf-${Date.now()}`;
 
   constructor() {
-    // Attempt to load stored user credentials if available
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const storedId = localStorage.getItem('code_mafia_user_id');
+    // Attempt to load stored user credentials if available (sessionStorage first for tab isolation)
+    if (typeof window !== 'undefined') {
+      const storedId = sessionStorage.getItem('code_mafia_user_id') || localStorage.getItem('code_mafia_user_id');
       const storedName = localStorage.getItem('code_mafia_active_user');
       if (storedId) this.playerId = storedId;
       if (storedName) this.playerName = storedName;

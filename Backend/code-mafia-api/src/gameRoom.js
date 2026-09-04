@@ -67,10 +67,8 @@ export class GameRoom {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    // Accept WebSocket with Cloudflare Hibernation API
-    this.state.acceptWebSocket(server, [playerId]);
-
     const sessionId = `ws-${Date.now()}-${Math.floor(Math.random() * 9999)}`;
+    this.state.acceptWebSocket(server, [sessionId]);
     this.sessions.set(server, { id: sessionId, roomId: cleanRoomId, playerName, playerId });
 
     // Send immediate confirmation + current room state to newly connected client
@@ -144,7 +142,7 @@ export class GameRoom {
               };
             } else {
               const players = this.roomState.players || [];
-              const idx = players.findIndex(p => p.id === player.id || p.displayName === player.displayName);
+              const idx = players.findIndex(p => p.id === player.id);
               if (idx >= 0) {
                 players[idx] = { ...players[idx], ...player };
               } else {
