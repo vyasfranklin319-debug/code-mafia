@@ -39,9 +39,8 @@ const ALLOWED_ORIGINS = [
 ];
 
 function corsHeaders(requestOrigin) {
-  const origin = ALLOWED_ORIGINS.includes(requestOrigin)
-    ? requestOrigin
-    : ALLOWED_ORIGINS[0]; // fallback to production domain
+  const isAllowed = ALLOWED_ORIGINS.includes(requestOrigin) || (typeof requestOrigin === 'string' && requestOrigin.endsWith('.vercel.app'));
+  const origin = isAllowed ? requestOrigin : ALLOWED_ORIGINS[0];
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',

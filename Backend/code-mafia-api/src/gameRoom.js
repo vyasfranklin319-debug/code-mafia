@@ -29,9 +29,8 @@ export class GameRoom {
         'http://localhost:5173',
         'http://localhost:3000',
       ];
-      const origin = allowedOrigins.includes(requestOrigin)
-        ? requestOrigin
-        : allowedOrigins[0];
+      const isAllowed = allowedOrigins.includes(requestOrigin) || (typeof requestOrigin === 'string' && requestOrigin.endsWith('.vercel.app'));
+      const origin = isAllowed ? requestOrigin : allowedOrigins[0];
 
       const cors = {
         'Access-Control-Allow-Origin': origin,
