@@ -81,6 +81,12 @@ export const WorkRoundPage: React.FC<WorkRoundPageProps> = ({
             onTimerExpired={onAdvanceToDiscussion}
             label="WORK TIMER"
           />
+
+          <div className="hidden lg:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-emerald-950/60 border border-emerald-800/60 text-emerald-300 font-mono text-[11px] shadow-sm">
+            <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Runtime: {session.contentPack.name} ({session.contentPack.language.toUpperCase()})</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Multiplayer Runtime Sync Active" />
+          </div>
         </div>
 
         <div className="flex items-center space-x-2">

@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { GameSession, Player } from '../types/game';
 import { PhaseTimer } from '../components/PhaseTimer';
-import { Vote, Check, UserX, AlertCircle, Sparkles } from 'lucide-react';
+import { Vote, Check, UserX, AlertCircle, Sparkles, CheckCircle2, Award } from 'lucide-react';
 
 interface VotingPageProps {
   session: GameSession;
@@ -16,12 +16,20 @@ export const VotingPage: React.FC<VotingPageProps> = ({
   onCastVote,
   onTimerExpired
 }) => {
-  const [selectedTargetId, setSelectedTargetId] = useState<string | null>(
-    session.votes[currentUser.id] !== undefined ? session.votes[currentUser.id] : null
-  );
+  const currentSavedVote = session.votes?.[currentUser.id] !== undefined ? session.votes[currentUser.id] : null;
+  const [selectedTargetId, setSelectedTargetId] = useState<string | null>(currentSavedVote);
+
+  useEffect(() => {
+    if (session.votes?.[currentUser.id] !== undefined) {
+      setSelectedTargetId(session.votes[currentUser.id]);
+    }
+  }, [session.votes?.[currentUser.id]]);
 
   const alivePlayers = session.players.filter(p => p.isAlive);
   const isAlive = currentUser.isAlive;
+  const votesMap = session.votes || {};
+  const votedCount = alivePlayers.filter(p => votesMap[p.id] !== undefined).length;
+  const allVoted = votedCount >= alivePlayers.length && alivePlayers.length > 0;
 
   const handleVoteSelect = (targetId: string | null) => {
     if (!isAlive) return;
@@ -48,11 +56,40 @@ export const VotingPage: React.FC<VotingPageProps> = ({
           </p>
         </div>
 
-        <div className="z-10 shrink-0">
+        <div className="z-10 shrink-0 flex flex-col items-end gap-2">
           <PhaseTimer
             endsAt={session.phaseEndsAt}
             onTimerExpired={onTimerExpired}
             label="VOTING CLOSES"
+          />
+          {currentUser.isHost && (
+            <button
+              onClick={onTimerExpired}
+              className={`px-4 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-md ${
+                allVoted
+                  ? 'bg-purple-600 hover:bg-purple-500 text-white animate-pulse'
+                  : 'bg-white/10 hover:bg-white/20 text-slate-300'
+              }`}
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span>{allVoted ? 'Tally Votes Now' : 'End Voting Early'}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Live Voting Progress Bar */}
+      <div className="p-4 rounded-2xl bg-purple-950/30 border border-purple-800/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-3 h-3 rounded-full bg-emerald-400 animate-ping" />
+          <span className="text-xs font-mono font-bold text-slate-200">
+            BALLOTS CAST: <span className="text-purple-400 font-extrabold">{votedCount}</span> / {alivePlayers.length} OPERATIVES
+          </span>
+        </div>
+        <div className="w-full sm:w-64 bg-black/50 h-2.5 rounded-full overflow-hidden border border-white/10">
+          <div
+            className="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full transition-all duration-300"
+            style={{ width: `${alivePlayers.length > 0 ? (votedCount / alivePlayers.length) * 100 : 0}%` }}
           />
         </div>
       </div>
@@ -70,14 +107,15 @@ export const VotingPage: React.FC<VotingPageProps> = ({
         {alivePlayers.map(p => {
           const isSelf = p.id === currentUser.id;
           const isSelected = selectedTargetId === p.id;
+          const hasVoted = votesMap[p.id] !== undefined;
 
           return (
             <div
               key={p.id}
               onClick={() => !isSelf && handleVoteSelect(p.id)}
-              className={`p-6 rounded-3xl transition-all duration-200 ${
+              className={`p-6 rounded-3xl transition-all duration-200 relative ${
                 isSelf
-                  ? 'bg-black/30 border border-white/5 opacity-50 cursor-not-allowed'
+                  ? 'bg-black/30 border border-white/5 opacity-60 cursor-not-allowed'
                   : isSelected
                   ? 'gaming-card-active scale-105 cursor-pointer'
                   : 'gaming-card hover:border-purple-500/50 cursor-pointer hover:scale-102'
@@ -88,11 +126,18 @@ export const VotingPage: React.FC<VotingPageProps> = ({
                   {p.displayName.charAt(0).toUpperCase()}
                 </div>
 
-                {isSelected && (
-                  <span className="px-3 py-1 rounded-full bg-purple-600 text-white text-[10px] font-bold flex items-center gap-1.5 shadow-md animate-pulse">
-                    <Check className="w-3.5 h-3.5" /> VOTED TARGET
-                  </span>
-                )}
+                <div className="flex flex-col items-end gap-1.5">
+                  {isSelected && (
+                    <span className="px-2.5 py-0.5 rounded-full bg-purple-600 text-white text-[10px] font-bold flex items-center gap-1 shadow-md">
+                      <Check className="w-3 h-3" /> YOUR TARGET
+                    </span>
+                  )}
+                  {hasVoted && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-950/70 border border-emerald-700/60 text-emerald-400 text-[10px] font-mono font-bold flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3" /> VOTED
+                    </span>
+                  )}
+                </div>
               </div>
 
               <h3 className="font-extrabold text-slate-100 text-base flex items-center gap-2">

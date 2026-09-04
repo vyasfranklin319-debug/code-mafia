@@ -19,6 +19,7 @@ export interface RTDBRoomData {
     id: string;
     joinCode: string;
     phase: string;
+    phaseEndsAt?: number;
     currentRound?: number;
     hostName: string;
     config?: any;
@@ -28,6 +29,8 @@ export interface RTDBRoomData {
     createdAt: number;
   };
   players: Record<string, Player>;
+  files?: any[];
+  votes?: Record<string, string | null>;
 }
 
 /**
@@ -43,6 +46,7 @@ export async function saveRoomToRTDB(session: GameSession): Promise<void> {
     id: session.id,
     joinCode: cleanCode,
     phase: session.phase || 'LOBBY',
+    phaseEndsAt: session.phaseEndsAt || 0,
     currentRound: session.currentRound || 1,
     hostName: hostPlayer?.displayName || session.hostName || 'OperativeHost',
     config: session.config || null,
@@ -67,7 +71,12 @@ export async function saveRoomToRTDB(session: GameSession): Promise<void> {
     };
   });
 
-  await set(roomRef, { meta, players: playersMap });
+  await set(roomRef, {
+    meta,
+    players: playersMap,
+    files: session.files || [],
+    votes: session.votes || {}
+  });
 
   // Setup disconnect handler for host
   if (hostPlayer) {
@@ -110,7 +119,7 @@ export async function joinRoomInRTDB(joinCode: string, player: Player): Promise<
 /**
  * Fetch a room from RTDB by join code or ID.
  */
-export async function getRoomFromRTDB(pinOrCode: string): Promise<{ meta: any; players: Player[] } | null> {
+export async function getRoomFromRTDB(pinOrCode: string): Promise<{ meta: any; players: Player[]; files?: any[] | null; votes?: Record<string, string | null> } | null> {
   if (!pinOrCode) return null;
   const cleanCode = pinOrCode.trim().toUpperCase();
   const roomRef = ref(db, 'rooms/' + cleanCode);
@@ -132,9 +141,17 @@ export async function getRoomFromRTDB(pinOrCode: string): Promise<{ meta: any; p
       stats: p.stats || { bugsFixed: 0, testsRun: 0, votesCast: 0 }
     }));
 
+    const rawVotes = val.votes || {};
+    const parsedVotes: Record<string, string | null> = {};
+    for (const [k, v] of Object.entries(rawVotes)) {
+      parsedVotes[k] = v === '__ABSTAIN__' ? null : (v as string | null);
+    }
+
     return {
       meta: val.meta || {},
-      players
+      players,
+      files: val.files || null,
+      votes: parsedVotes
     };
   } catch (err: any) {
     console.warn('[RTDB] getRoomFromRTDB error:', err.message);
@@ -174,21 +191,66 @@ export async function setRoomPhaseInRTDB(joinCode: string, phase: string, extraM
 }
 
 /**
- * Sync in-game session updates (e.g., active code, test runs, round info) to RTDB.
+ * Sync in-game session updates (e.g., active code, test runs, round info, phase timer) to RTDB.
  */
 export async function syncSessionToRTDB(session: GameSession): Promise<void> {
   const cleanCode = (session.joinCode || session.id).trim().toUpperCase();
-  const metaRef = ref(db, 'rooms/' + cleanCode + '/meta');
+  const roomRef = ref(db, 'rooms/' + cleanCode);
   try {
-    await update(metaRef, {
-      phase: session.phase,
-      currentRound: session.currentRound,
-      winner: session.winner || null,
-      updatedAt: Date.now()
-    });
+    const updates: Record<string, any> = {
+      'meta/phase': session.phase,
+      'meta/currentRound': session.currentRound,
+      'meta/phaseEndsAt': session.phaseEndsAt || 0,
+      'meta/winner': session.winner || null,
+      'meta/updatedAt': Date.now()
+    };
+    if (session.files && session.files.length > 0) {
+      updates['files'] = session.files;
+    }
+    if (session.votes) {
+      updates['votes'] = session.votes;
+    }
+    await update(roomRef, updates);
   } catch (e: any) {
     console.warn('[RTDB] syncSessionToRTDB error:', e.message);
   }
+}
+
+/**
+ * Cast or change a player's vote in RTDB.
+ */
+export async function castVoteInRTDB(joinCode: string, voterId: string, targetId: string | null): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const voteRef = ref(db, 'rooms/' + cleanCode + '/votes/' + voterId);
+  await set(voteRef, targetId === null ? '__ABSTAIN__' : targetId);
+
+  // Touch room updatedAt to notify listeners
+  const metaUpdatedRef = ref(db, 'rooms/' + cleanCode + '/meta/updatedAt');
+  await set(metaUpdatedRef, Date.now());
+}
+
+/**
+ * Reset / clear all votes for a new voting round.
+ */
+export async function clearVotesInRTDB(joinCode: string): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const votesRef = ref(db, 'rooms/' + cleanCode + '/votes');
+  await set(votesRef, {});
+
+  const metaUpdatedRef = ref(db, 'rooms/' + cleanCode + '/meta/updatedAt');
+  await set(metaUpdatedRef, Date.now());
+}
+
+/**
+ * Push updated codebase files to RTDB so all players have access to runtime code.
+ */
+export async function syncFilesToRTDB(joinCode: string, files: any[]): Promise<void> {
+  const cleanCode = joinCode.trim().toUpperCase();
+  const filesRef = ref(db, 'rooms/' + cleanCode + '/files');
+  await set(filesRef, files);
+
+  const metaUpdatedRef = ref(db, 'rooms/' + cleanCode + '/meta/updatedAt');
+  await set(metaUpdatedRef, Date.now());
 }
 
 /**
@@ -229,12 +291,12 @@ export async function findGlobalOpenSessionFromRTDB(): Promise<{ joinCode: strin
 }
 
 /**
- * Real-time listener for the entire room (players and meta) in RTDB.
+ * Real-time listener for the entire room (players, meta, files, and votes) in RTDB.
  * Returns unsubscribe function.
  */
 export function listenToRoomInRTDB(
   joinCode: string,
-  onUpdate: (roomData: { meta: any; players: Player[] }) => void
+  onUpdate: (roomData: { meta: any; players: Player[]; files?: any[] | null; votes?: Record<string, string | null> }) => void
 ): () => void {
   const cleanCode = joinCode.trim().toUpperCase();
   const roomRef = ref(db, 'rooms/' + cleanCode);
@@ -259,9 +321,18 @@ export function listenToRoomInRTDB(
     // Sort: host first
     players.sort((a, b) => (b.isHost ? 1 : 0) - (a.isHost ? 1 : 0));
 
+    // Parse votes (__ABSTAIN__ -> null)
+    const rawVotes = val.votes || {};
+    const parsedVotes: Record<string, string | null> = {};
+    for (const [k, v] of Object.entries(rawVotes)) {
+      parsedVotes[k] = v === '__ABSTAIN__' ? null : (v as string | null);
+    }
+
     onUpdate({
       meta: val.meta || {},
-      players
+      players,
+      files: val.files || null,
+      votes: parsedVotes
     });
   }, (err: Error) => {
     console.warn('[RTDB] Room listener error:', err.message);

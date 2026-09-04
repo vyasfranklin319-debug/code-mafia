@@ -26,7 +26,10 @@ import {
   setRoomPhaseInRTDB,
   syncSessionToRTDB,
   findGlobalOpenSessionFromRTDB,
-  listenToRoomInRTDB
+  listenToRoomInRTDB,
+  castVoteInRTDB,
+  clearVotesInRTDB,
+  syncFilesToRTDB
 } from './services/realtimeSync';
 
 import { Navbar } from './components/Navbar';
@@ -158,14 +161,16 @@ export const App: React.FC = () => {
         }
       }
 
-      if (event === 'CODE_UPDATED') {
-        setSession(prev => {
-          if (!prev) return null;
-          const updatedFiles = prev.files.map(f =>
-            f.path === data.filePath ? { ...f, currentContent: data.newContent } : f
-          );
-          return { ...prev, files: updatedFiles };
-        });
+      if (event === 'CODE_UPDATED' || event === 'CODE_EDIT') {
+        if (data && data.filePath && data.newContent !== undefined) {
+          setSession(prev => {
+            if (!prev) return null;
+            const updatedFiles = prev.files.map(f =>
+              f.path === data.filePath ? { ...f, currentContent: data.newContent } : f
+            );
+            return { ...prev, files: updatedFiles };
+          });
+        }
       }
 
       if (event === 'TEST_RUN_COMPLETED') {
@@ -184,11 +189,13 @@ export const App: React.FC = () => {
         });
       }
 
-      if (event === 'VOTE_REGISTERED') {
-        setSession(prev => {
-          if (!prev) return null;
-          return { ...prev, votes: { ...prev.votes, [data.voterId]: data.targetId } };
-        });
+      if (event === 'VOTE_REGISTERED' || event === 'CAST_VOTE') {
+        if (data && data.voterId) {
+          setSession(prev => {
+            if (!prev) return null;
+            return { ...prev, votes: { ...prev.votes, [data.voterId]: data.targetId } };
+          });
+        }
       }
     });
 
@@ -200,12 +207,12 @@ export const App: React.FC = () => {
 
   // ─── REALTIME DATABASE MULTIPLAYER LISTENER ─────────────────────────────────
   // Primary multiplayer sync engine: Realtime Database with 0 quota issues,
-  // sub-100ms latency, and automatic presence tracking.
+  // sub-100ms latency, automatic presence tracking, and synchronized code/vote state.
   useEffect(() => {
     const joinCode = session?.joinCode?.toUpperCase();
     if (!joinCode || !currentUser || !session) return;
 
-    const unsub = listenToRoomInRTDB(joinCode, ({ meta, players }) => {
+    const unsub = listenToRoomInRTDB(joinCode, ({ meta, players, files, votes }) => {
       if (!players || players.length === 0) return;
 
       setSession(prev => {
@@ -232,6 +239,36 @@ export const App: React.FC = () => {
           changed = true;
         }
 
+        // 4. Authoritative Phase Timer Sync: guarantees identical countdowns on all devices
+        if (meta?.phaseEndsAt !== undefined && meta.phaseEndsAt !== prev.phaseEndsAt) {
+          updated.phaseEndsAt = meta.phaseEndsAt;
+          changed = true;
+        }
+
+        // 5. Sync winner state if game finished
+        if (meta?.winner !== undefined && meta.winner !== prev.winner) {
+          updated.winner = meta.winner;
+          changed = true;
+        }
+
+        // 6. Real-time Votes Sync across all players
+        if (votes && JSON.stringify(votes) !== JSON.stringify(prev.votes)) {
+          updated.votes = votes;
+          changed = true;
+        }
+
+        // 7. Runtime Codebase Sync: propagate shared code files across all operatives
+        if (files && Array.isArray(files) && files.length > 0) {
+          const filesDiffer = files.some(rf => {
+            const local = prev.files.find(lf => lf.path === rf.path);
+            return !local || local.currentContent !== rf.currentContent;
+          });
+          if (filesDiffer) {
+            updated.files = files;
+            changed = true;
+          }
+        }
+
         return changed ? updated : prev;
       });
 
@@ -240,8 +277,8 @@ export const App: React.FC = () => {
         if (!prev) return prev;
         const me = players.find(p => p.id === prev.id || p.displayName === prev.displayName);
         if (!me) return prev;
-        if (me.isHost !== prev.isHost || me.isReady !== prev.isReady) {
-          return { ...prev, isHost: me.isHost, isReady: me.isReady };
+        if (me.isHost !== prev.isHost || me.isReady !== prev.isReady || me.isAlive !== prev.isAlive) {
+          return { ...prev, isHost: me.isHost, isReady: me.isReady, isAlive: me.isAlive };
         }
         return prev;
       });
@@ -400,6 +437,11 @@ export const App: React.FC = () => {
           id: rtdbRoom.meta.id || cleanPin,
           joinCode: cleanPin,
           phase: (rtdbRoom.meta.phase as any) || 'LOBBY',
+          phaseEndsAt: rtdbRoom.meta.phaseEndsAt || 0,
+          currentRound: rtdbRoom.meta.currentRound || 1,
+          winner: rtdbRoom.meta.winner || null,
+          files: (rtdbRoom.files && Array.isArray(rtdbRoom.files) && rtdbRoom.files.length > 0) ? rtdbRoom.files : base.files,
+          votes: rtdbRoom.votes || {},
           hostName,
           players: updatedPlayers
         };
@@ -602,9 +644,9 @@ export const App: React.FC = () => {
 
     const channelKey = (session.joinCode || session.id).toUpperCase();
 
-    // PRIMARY SYNC: Broadcast phase transition in RTDB
+    // PRIMARY SYNC: Broadcast phase transition in RTDB with authoritative timer
     if (session.joinCode) {
-      await setRoomPhaseInRTDB(session.joinCode, 'ROLE_REVEAL');
+      await setRoomPhaseInRTDB(session.joinCode, 'ROLE_REVEAL', { phaseEndsAt: sessionWithRoles.phaseEndsAt });
       await syncSessionToRTDB(sessionWithRoles);
     }
 
@@ -625,7 +667,7 @@ export const App: React.FC = () => {
 
     const channelKey = (session.joinCode || session.id).toUpperCase();
     if (session.joinCode) {
-      await setRoomPhaseInRTDB(session.joinCode, 'WORK_ROUND');
+      await setRoomPhaseInRTDB(session.joinCode, 'WORK_ROUND', { phaseEndsAt: workSession.phaseEndsAt });
       await syncSessionToRTDB(workSession);
     }
     emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: 'WORK_ROUND', session: workSession });
@@ -681,8 +723,22 @@ export const App: React.FC = () => {
       replayFrames: [...session.replayFrames, newReplayFrame]
     });
 
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+
+    // Sync updated runtime codebase to RTDB so all players see changes live
+    if (session.joinCode) {
+      syncFilesToRTDB(session.joinCode, updatedFiles);
+    }
+
     emitMultiplayerEvent('CODE_EDIT', {
-      roomId: session.id,
+      roomId: channelKey,
+      filePath,
+      newContent,
+      playerId: currentUser.id,
+      playerName: currentUser.displayName
+    });
+    emitMultiplayerEvent('CODE_UPDATED', {
+      roomId: channelKey,
       filePath,
       newContent,
       playerId: currentUser.id,
@@ -928,31 +984,36 @@ export const App: React.FC = () => {
   };
 
   // Handler: Advance to Discussion
-  const handleAdvanceToDiscussion = () => {
+  const handleAdvanceToDiscussion = async () => {
     if (!session) return;
     const discSession = startDiscussion(session);
     setSession(discSession);
     setCurrentPhase('DISCUSSION');
+    const channelKey = (session.joinCode || session.id).toUpperCase();
     if (session.joinCode) {
-      setRoomPhaseInRTDB(session.joinCode, 'DISCUSSION');
-      syncSessionToRTDB(discSession);
+      await setRoomPhaseInRTDB(session.joinCode, 'DISCUSSION', { phaseEndsAt: discSession.phaseEndsAt });
+      await syncSessionToRTDB(discSession);
     }
+    emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: 'DISCUSSION', session: discSession });
   };
 
   // Handler: Advance to Voting
-  const handleAdvanceToVoting = () => {
+  const handleAdvanceToVoting = async () => {
     if (!session) return;
     const votingSession = startVoting(session);
     setSession(votingSession);
     setCurrentPhase('VOTING');
+    const channelKey = (session.joinCode || session.id).toUpperCase();
     if (session.joinCode) {
-      setRoomPhaseInRTDB(session.joinCode, 'VOTING');
-      syncSessionToRTDB(votingSession);
+      await clearVotesInRTDB(session.joinCode);
+      await setRoomPhaseInRTDB(session.joinCode, 'VOTING', { phaseEndsAt: votingSession.phaseEndsAt });
+      await syncSessionToRTDB(votingSession);
     }
+    emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: 'VOTING', session: votingSession });
   };
 
   // Handler: Cast Vote
-  const handleCastVote = (targetPlayerId: string | null) => {
+  const handleCastVote = async (targetPlayerId: string | null) => {
     if (!session || !currentUser) return;
     const updatedVotes = { ...session.votes, [currentUser.id]: targetPlayerId };
 
@@ -962,7 +1023,7 @@ export const App: React.FC = () => {
       playerId: currentUser.id,
       playerName: currentUser.displayName,
       type: 'VOTE' as const,
-      details: `Cast elimination vote`
+      details: targetPlayerId ? `Cast elimination vote` : `Abstained from voting`
     };
 
     setSession({
@@ -971,33 +1032,52 @@ export const App: React.FC = () => {
       activityFeed: [...session.activityFeed, voteEvent]
     });
 
+    const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await castVoteInRTDB(session.joinCode, currentUser.id, targetPlayerId);
+    }
+
     emitMultiplayerEvent('CAST_VOTE', {
-      roomId: session.id,
+      roomId: channelKey,
+      voterId: currentUser.id,
+      targetId: targetPlayerId
+    });
+    emitMultiplayerEvent('VOTE_REGISTERED', {
+      roomId: channelKey,
       voterId: currentUser.id,
       targetId: targetPlayerId
     });
   };
 
   // Handler: Tally Vote -> Process Elimination
-  const handleProcessElimination = () => {
+  const handleProcessElimination = async () => {
     if (!session) return;
+    // CRITICAL: Only the host computes authoritative elimination outcome and broadcasts to all peers
+    if (currentUser && !currentUser.isHost) {
+      console.log('[Voting] Operative client waiting for Host to tally votes and broadcast elimination...');
+      return;
+    }
     const elimSession = processElimination(session);
     setSession(elimSession);
     setCurrentPhase(elimSession.phase);
+    const channelKey = (session.joinCode || session.id).toUpperCase();
     if (session.joinCode) {
-      setRoomPhaseInRTDB(session.joinCode, elimSession.phase);
-      syncSessionToRTDB(elimSession);
+      await setRoomPhaseInRTDB(session.joinCode, elimSession.phase, { phaseEndsAt: elimSession.phaseEndsAt });
+      await syncSessionToRTDB(elimSession);
     }
+    emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: elimSession.phase, session: elimSession });
   };
 
   // Handler: Continue after Elimination
-  const handleContinueAfterElimination = () => {
+  const handleContinueAfterElimination = async () => {
     if (!session) return;
+    const channelKey = (session.joinCode || session.id).toUpperCase();
     if (session.phase === 'RESULTS') {
       setCurrentPhase('RESULTS');
       if (session.joinCode) {
-        setRoomPhaseInRTDB(session.joinCode, 'RESULTS');
+        await setRoomPhaseInRTDB(session.joinCode, 'RESULTS');
       }
+      emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: 'RESULTS', session });
     } else {
       const nextRoundSession: GameSession = {
         ...session,
@@ -1007,9 +1087,13 @@ export const App: React.FC = () => {
       setSession(workSession);
       setCurrentPhase('WORK_ROUND');
       if (session.joinCode) {
-        setRoomPhaseInRTDB(session.joinCode, 'WORK_ROUND', { currentRound: nextRoundSession.currentRound });
-        syncSessionToRTDB(workSession);
+        await setRoomPhaseInRTDB(session.joinCode, 'WORK_ROUND', {
+          currentRound: nextRoundSession.currentRound,
+          phaseEndsAt: workSession.phaseEndsAt
+        });
+        await syncSessionToRTDB(workSession);
       }
+      emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: 'WORK_ROUND', session: workSession });
     }
   };
 

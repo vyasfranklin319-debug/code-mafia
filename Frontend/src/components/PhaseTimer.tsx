@@ -9,12 +9,23 @@ interface PhaseTimerProps {
 
 export const PhaseTimer: React.FC<PhaseTimerProps> = ({ endsAt, onTimerExpired, label }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
+  const hasFiredRef = React.useRef(false);
 
   useEffect(() => {
+    hasFiredRef.current = false;
+  }, [endsAt]);
+
+  useEffect(() => {
+    if (!endsAt || endsAt <= 0) {
+      setTimeLeft(0);
+      return;
+    }
+
     const updateTime = () => {
       const remaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
       setTimeLeft(remaining);
-      if (remaining === 0 && onTimerExpired) {
+      if (remaining === 0 && onTimerExpired && !hasFiredRef.current) {
+        hasFiredRef.current = true;
         onTimerExpired();
       }
     };
