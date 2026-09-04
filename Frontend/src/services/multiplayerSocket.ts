@@ -9,24 +9,38 @@ let eventSource: EventSource | null = null;
 let heartbeatInterval: any = null;
 let reconnectTimer: any = null;
 let currentRoomId: string | null = null;
+let currentPlayer: any | null = null;
 let currentOnEvent: ((event: string, data: any) => void) | null = null;
+
+// PRODUCTION CLOUDFLARE WORKER URL — always use this for WebSocket connections
+const PROD_WS_URL = 'wss://code-mafia-api.codemafia.workers.dev';
+const PROD_HTTP_URL = 'https://code-mafia-api.codemafia.workers.dev';
 
 const getHostUrls = () => {
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-  const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
-  const httpProto = isHttps ? 'https:' : 'http:';
-  const wsProto = isHttps ? 'wss:' : 'ws:';
+  const isLocalDev = host === 'localhost' || host === '127.0.0.1';
 
-  const httpUrl = (import.meta as any).env?.VITE_BACKEND_URL || (import.meta as any).env?.VITE_API_BASE_URL || `${httpProto}//${host}:3001`;
-  const wsUrl = (import.meta as any).env?.VITE_WS_URL || `${wsProto}//${host}:3001`;
+  if (isLocalDev) {
+    return {
+      httpUrl: (import.meta as any).env?.VITE_BACKEND_URL || 'http://localhost:3001',
+      wsUrl: (import.meta as any).env?.VITE_WS_URL || 'ws://localhost:3001',
+      isLocalDev: true
+    };
+  }
 
-  return { httpUrl, wsUrl };
+  // Production: Always route to Cloudflare Worker
+  return {
+    httpUrl: PROD_HTTP_URL,
+    wsUrl: PROD_WS_URL,
+    isLocalDev: false
+  };
 };
 
 export function initSocketConnection(roomId: string, player: any, onEvent: (event: string, data: any) => void) {
   currentRoomId = roomId;
+  currentPlayer = player;
   currentOnEvent = onEvent;
-  const { httpUrl, wsUrl } = getHostUrls();
+  const { httpUrl, wsUrl, isLocalDev } = getHostUrls();
 
   // 1. Setup local BroadcastChannel for zero-latency multi-tab sync
   if ('BroadcastChannel' in window) {
@@ -44,10 +58,10 @@ export function initSocketConnection(roomId: string, player: any, onEvent: (even
   }
 
   // 2. Connect via Resilient Native WebSocket Stream
-  connectWebSocket(wsUrl, roomId, onEvent);
+  connectWebSocket(wsUrl, roomId, player, onEvent);
 
-  // 3. Fallback: SSE only if on local HTTP dev server (not Cloudflare Workers)
-  if (httpUrl.includes('localhost') || httpUrl.includes('127.0.0.1')) {
+  // 3. Fallback: SSE only on local dev
+  if (isLocalDev) {
     try {
       if (eventSource) eventSource.close();
       const fullSseUrl = `${httpUrl}/api/v1/events/${roomId}`;
@@ -64,19 +78,29 @@ export function initSocketConnection(roomId: string, player: any, onEvent: (even
   }
 }
 
-function connectWebSocket(wsUrl: string, roomId: string, onEvent: (event: string, data: any) => void) {
+function connectWebSocket(wsUrl: string, roomId: string, player: any, onEvent: (event: string, data: any) => void) {
   try {
     if (webSocket) {
       webSocket.close();
       webSocket = null;
     }
 
-    const fullWsUrl = `${wsUrl}/ws/room/${roomId}`;
+    // Pass player name as query param so the Durable Object knows who's connecting
+    const playerName = encodeURIComponent(player?.displayName || 'Anonymous');
+    const fullWsUrl = `${wsUrl}/ws/room/${roomId}?name=${playerName}`;
     webSocket = new WebSocket(fullWsUrl);
 
     webSocket.onopen = () => {
-      console.log(`[WebSocket Stream] Connected to room ${roomId} at ${fullWsUrl}`);
-      
+      console.log(`[WebSocket Stream] Connected to room ${roomId}`);
+
+      // Send PLAYER_IDENTIFY immediately after connection so the DO stores full player data
+      if (webSocket && webSocket.readyState === WebSocket.OPEN && player) {
+        webSocket.send(JSON.stringify({
+          event: 'PLAYER_IDENTIFY',
+          payload: { player }
+        }));
+      }
+
       // Start 15s Heartbeat Ping to prevent Cloudflare/Proxy timeout
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       heartbeatInterval = setInterval(() => {
@@ -98,12 +122,12 @@ function connectWebSocket(wsUrl: string, roomId: string, onEvent: (event: string
     webSocket.onclose = () => {
       console.log('[WebSocket Stream] Connection closed. Auto-reconnecting in 2s...');
       if (heartbeatInterval) clearInterval(heartbeatInterval);
-      
+
       // Auto-reconnect if still in room
       if (currentRoomId === roomId && currentOnEvent) {
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(() => {
-          connectWebSocket(wsUrl, roomId, onEvent);
+          connectWebSocket(wsUrl, roomId, currentPlayer, onEvent);
         }, 2000);
       }
     };

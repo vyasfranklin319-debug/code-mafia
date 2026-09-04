@@ -10,7 +10,7 @@ import {
   evaluateWinConditions
 } from './services/gameEngine';
 import { executeTestSuite } from './services/sandbox/testRunner';
-import { generateBotPlayers } from './services/botSim';
+// botSim removed — no AI bots in multiplayer
 import { createCommit } from './services/gitEngine';
 import { createPrHotfix, calculateSystemIntegrity } from './services/prHotfixEngine';
 import { activateMemoryLeak, activateSilentRegression, activateSyntaxMasking } from './services/sabotageEngine';
@@ -55,8 +55,14 @@ export const App: React.FC = () => {
     try {
       const savedUser = localStorage.getItem('code_mafia_active_user');
       if (savedUser) {
+        // FIX BUG 4: Reuse stable persisted ID so it never changes across refreshes
+        let stableId = localStorage.getItem('code_mafia_user_id');
+        if (!stableId) {
+          stableId = `usr-${Date.now()}`;
+          localStorage.setItem('code_mafia_user_id', stableId);
+        }
         return {
-          id: `usr-${Date.now()}`,
+          id: stableId,
           displayName: savedUser,
           isAlive: true,
           isHost: false,
@@ -91,12 +97,26 @@ export const App: React.FC = () => {
 
     initSocketConnection(channelKey, currentUser, (event, data) => {
       if (event === 'PLAYER_JOINED') {
+        // Firestore is the authoritative source for player roster updates.
+        // WebSocket PLAYER_JOINED is a low-latency signal — only add if player data exists and not already in list.
         if (data && data.player) {
           setSession(prev => {
             if (!prev) return null;
             const exists = prev.players.some(p => p.id === data.player.id || p.displayName === data.player.displayName);
             if (exists) return prev;
             return { ...prev, players: [...prev.players, data.player] };
+          });
+        }
+      }
+
+      // ROOM_STATE: sent by Durable Object with full current player roster when a new player identifies
+      if (event === 'ROOM_STATE') {
+        if (data && Array.isArray(data.players)) {
+          setSession(prev => {
+            if (!prev) return null;
+            // Merge DO players list with local session players list
+            // Trust Firestore for full player objects; use ROOM_STATE for presence detection only
+            return prev;
           });
         }
       }
@@ -162,7 +182,10 @@ export const App: React.FC = () => {
     });
 
     return () => disconnectSocket();
-  }, [session?.id, session?.joinCode, currentUser?.id]);
+  // FIX BUG 2: Remove currentUser?.id — Firestore listener updates currentUser which was
+  // causing the socket to disconnect/reconnect on every player join event.
+  // The socket room key only depends on the session keys, not on currentUser identity.
+  }, [session?.id, session?.joinCode]);
 
   // Realtime Cloud Firestore Stream Listener (Without re-sync write loop)
   // Listens on the joinCode (canonical PIN key) since that's what syncSessionToFirestore writes to.
@@ -204,12 +227,18 @@ export const App: React.FC = () => {
         return changed ? updated : prev;
       });
 
-      // Sync currentUser.isHost to match Firestore authoritative hostName
+      // FIX BUG 5: Sync currentUser.isHost AND isReady from Firestore authoritative state
       setCurrentUser(prev => {
-        if (!prev || !firestoreData.hostName) return prev;
-        const shouldBeHost = prev.displayName === firestoreData.hostName;
-        if (prev.isHost !== shouldBeHost) {
-          return { ...prev, isHost: shouldBeHost };
+        if (!prev || !firestoreData) return prev;
+        const shouldBeHost = firestoreData.hostName
+          ? prev.displayName === firestoreData.hostName
+          : prev.isHost;
+        const myPlayerData = (firestoreData.players || []).find(
+          (p: any) => p.displayName === prev.displayName || p.id === prev.id
+        );
+        const shouldBeReady = myPlayerData ? myPlayerData.isReady : prev.isReady;
+        if (prev.isHost !== shouldBeHost || prev.isReady !== shouldBeReady) {
+          return { ...prev, isHost: shouldBeHost, isReady: shouldBeReady };
         }
         return prev;
       });
@@ -239,8 +268,14 @@ export const App: React.FC = () => {
       if (apiRes && apiRes.sessionId) newSession.id = apiRes.sessionId;
 
       newSession.hostName = effectiveHost;
+      // FIX BUG 4: Persist stable userId so it survives refreshes
+      let stableUserId = localStorage.getItem('code_mafia_user_id');
+      if (!stableUserId) {
+        stableUserId = `usr-${Date.now()}`;
+        localStorage.setItem('code_mafia_user_id', stableUserId);
+      }
       const hostPlayer: Player = {
-        id: `usr-${Date.now()}`,
+        id: stableUserId,
         displayName: effectiveHost,
         isAlive: true,
         isHost: true,

@@ -7,13 +7,14 @@ export class GameRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.sessions = new Map(); // ws -> { id, roomId }
+    this.sessions = new Map(); // ws -> { id, roomId, playerName }
     this.maxCapacity = 6;
   }
 
   async fetch(request) {
     const url = new URL(request.url);
     const roomId = url.pathname.split('/ws/room/')[1]?.split('?')[0] || 'default';
+    const playerName = url.searchParams.get('name') || 'Anonymous';
 
     // Check capacity
     if (this.sessions.size >= this.maxCapacity) {
@@ -28,15 +29,18 @@ export class GameRoom {
     this.state.acceptWebSocket(server);
 
     const sessionId = `ws-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    this.sessions.set(server, { id: sessionId, roomId });
+    this.sessions.set(server, { id: sessionId, roomId, playerName });
 
-    // Send connected message
+    const getRoster = () => Array.from(this.sessions.values()).map(s => ({ id: s.id, name: s.playerName }));
+
+    // Send connected message with roster
     server.send(JSON.stringify({
       event: 'WS_CONNECTED',
       payload: {
         roomId,
         onlineCount: this.sessions.size,
         maxCapacity: this.maxCapacity,
+        roster: getRoster(),
       },
     }));
 
@@ -44,7 +48,7 @@ export class GameRoom {
     this.broadcast(server, {
       event: 'PLAYER_JOINED',
       payload: {
-        roomId,
+        player: { id: sessionId, name: playerName },
         onlineCount: this.sessions.size,
         maxCapacity: this.maxCapacity,
       },
@@ -75,7 +79,7 @@ export class GameRoom {
       this.broadcast(null, {
         event: 'PLAYER_LEFT',
         payload: {
-          roomId: session.roomId,
+          playerId: session.id,
           onlineCount: this.sessions.size,
           maxCapacity: this.maxCapacity,
         },

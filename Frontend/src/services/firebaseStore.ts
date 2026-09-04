@@ -126,6 +126,8 @@ export async function syncSessionToFirestore(session: GameSession) {
       players: sanitizedPlayers,
       playersCount: sanitizedPlayers.length,
       winner: session.winner || null,
+      // FIX BUG 3: Store config so joiners reconstruct the correct game configuration
+      config: session.config || null,
       updatedAt: serverTimestamp()
     };
 
