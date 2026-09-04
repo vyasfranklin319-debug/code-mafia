@@ -298,9 +298,20 @@ export const App: React.FC = () => {
       stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
     };
 
-    let chosenCode = stableJoinCode;
-    let sessionId = `sess-${Date.now()}`;
+    const initialSession = createInitialSession(config, effectiveHost, stableJoinCode);
+    initialSession.id = `sess-${Date.now()}`;
+    initialSession.hostName = effectiveHost;
+    initialSession.players = [hostPlayer];
 
+    // 1. INSTANT UI TRANSITION (Zero latency, user enters lobby immediately!)
+    setSession(initialSession);
+    setCurrentUser(hostPlayer);
+    setCurrentPhase('LOBBY');
+
+    // 2. PRIMARY SYNC: Save room to RTDB immediately
+    saveRoomToRTDB(initialSession).catch(err => console.warn('[RTDB saveRoom error]:', err));
+
+    // 3. Worker API integration (non-blocking)
     try {
       const apiRes = await apiCreateSession({
         hostName: effectiveHost,
@@ -308,31 +319,21 @@ export const App: React.FC = () => {
         playerCount: config.playerCount,
         mafiaCount: config.mafiaCount
       });
-      if (apiRes && apiRes.joinCode) chosenCode = apiRes.joinCode.toUpperCase();
-      if (apiRes && apiRes.sessionId) sessionId = apiRes.sessionId;
+      if (apiRes && apiRes.joinCode && apiRes.joinCode !== stableJoinCode) {
+        setSession(prev => {
+          if (!prev) return prev;
+          const updated = { ...prev, joinCode: apiRes.joinCode.toUpperCase(), id: apiRes.sessionId || prev.id };
+          saveRoomToRTDB(updated).catch(() => {});
+          return updated;
+        });
+      }
     } catch (e) {
       console.warn('[API Create Session Fallback]:', e);
     }
 
-    const newSession = createInitialSession(config, effectiveHost, chosenCode);
-    newSession.id = sessionId;
-    newSession.hostName = effectiveHost;
-    newSession.players = [hostPlayer];
-
-    setSession(newSession);
-    setCurrentUser(hostPlayer);
-    setCurrentPhase('LOBBY');
-
-    // PRIMARY SYNC: Save entire room (meta + host player) to RTDB
+    // 4. Secondary: Firestore (safely ignored if quota exceeded)
     try {
-      await saveRoomToRTDB(newSession);
-    } catch (err) {
-      console.warn('[RTDB saveRoom error]:', err);
-    }
-
-    // Secondary: Firestore (safely ignored if quota exceeded)
-    try {
-      await syncSessionToFirestore(newSession);
+      await syncSessionToFirestore(initialSession);
     } catch (err) {
       console.warn('[Firestore sync skipped]:', err);
     }

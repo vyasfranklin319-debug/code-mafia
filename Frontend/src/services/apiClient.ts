@@ -3,9 +3,18 @@
  * Connects Frontend directly to Backend Microservices at http://localhost:3001
  */
 
-const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-const protocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https:' : 'http:';
-const API_BASE = (import.meta as any).env?.VITE_BACKEND_URL || `${protocol}//${host}:3001`;
+const PROD_API_URL = 'https://code-mafia-api.codemafia.workers.dev';
+
+const getApiBase = () => {
+  if (typeof window === 'undefined') return 'http://localhost:3001';
+  const host = window.location.hostname;
+  if (host === 'localhost' || host === '127.0.0.1') {
+    return (import.meta as any).env?.VITE_BACKEND_URL || 'http://localhost:3001';
+  }
+  return (import.meta as any).env?.VITE_BACKEND_URL || PROD_API_URL;
+};
+
+const API_BASE = getApiBase();
 
 async function request<T>(endpoint: string, method: string = 'GET', body?: any): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -16,18 +25,29 @@ async function request<T>(endpoint: string, method: string = 'GET', body?: any):
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
+  // 5-second timeout so API calls never hang indefinitely
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ error: 'Network response was not ok' }));
-    throw new Error(errorData.error || `HTTP error ${response.status}`);
+  try {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Network response was not ok' }));
+      throw new Error(errorData.error || `HTTP error ${response.status}`);
+    }
+
+    return response.json();
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    throw err;
   }
-
-  return response.json();
 }
 
 // 1. Health Check

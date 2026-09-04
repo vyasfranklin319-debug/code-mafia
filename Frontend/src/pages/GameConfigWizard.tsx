@@ -10,7 +10,7 @@ interface GameConfigWizardProps {
 }
 
 export const GameConfigWizard: React.FC<GameConfigWizardProps> = ({ currentUserName, onCancel, onCreateGame }) => {
-  const defaultHost = currentUserName || localStorage.getItem('code_mafia_active_user') || '';
+  const defaultHost = currentUserName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
   const [hostName, setHostName] = useState(defaultHost);
   const [selectedPackId, setSelectedPackId] = useState(allContentPacks[0].id);
   const [playerCount, setPlayerCount] = useState(6);
@@ -64,8 +64,7 @@ export const GameConfigWizard: React.FC<GameConfigWizardProps> = ({ currentUserN
     }
   ];
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleTriggerCreate = () => {
     const config: GameConfig = {
       packId: selectedPackId === 'custom-sandbox' ? allContentPacks[0].id : selectedPackId,
       playerCount,
@@ -78,7 +77,12 @@ export const GameConfigWizard: React.FC<GameConfigWizardProps> = ({ currentUserN
       passRateThreshold: 100,
       maxRounds: 3
     };
-    onCreateGame(config, hostName || 'VoidRunner_X');
+    onCreateGame(config, (hostName && hostName.trim()) || defaultHost || 'OperativeUser');
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    handleTriggerCreate();
   };
 
   return (
@@ -211,8 +215,10 @@ export const GameConfigWizard: React.FC<GameConfigWizardProps> = ({ currentUserN
         </div>
 
         <button
-          type="submit"
-          className="gaming-btn-purple px-8 py-3 rounded-2xl font-black text-xs tracking-widest uppercase flex items-center gap-2"
+          type="button"
+          onClick={handleTriggerCreate}
+          id="create-arena-room-btn"
+          className="gaming-btn-purple px-8 py-3 rounded-2xl font-black text-xs tracking-widest uppercase flex items-center gap-2 cursor-pointer hover:opacity-90 active:scale-95 transition-all shadow-lg shadow-purple-900/40"
         >
           <Play className="w-4 h-4 fill-current" />
           <span>CREATE ARENA ROOM</span>
