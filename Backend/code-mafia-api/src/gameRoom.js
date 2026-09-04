@@ -22,10 +22,23 @@ export class GameRoom {
 
     // ─── 1. Non-WebSocket HTTP Requests (CORS + State Query) ──────────────────
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+      const requestOrigin = request.headers.get('Origin') || '';
+      const allowedOrigins = [
+        'https://codemafia-54284.web.app',
+        'https://codemafia-54284.firebaseapp.com',
+        'http://localhost:5173',
+        'http://localhost:3000',
+      ];
+      const origin = allowedOrigins.includes(requestOrigin)
+        ? requestOrigin
+        : allowedOrigins[0];
+
       const cors = {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': origin,
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Credentials': 'true',
+        'Vary': 'Origin',
       };
 
       if (request.method === 'OPTIONS') {

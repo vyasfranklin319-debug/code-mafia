@@ -1,6 +1,41 @@
 {
   "rules": {
-    ".read": true,
-    ".write": true
+    // ── User Presence ──────────────────────────────────────────
+    // Each user can only read/write their own presence node.
+    "presence": {
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid == $uid"
+      }
+    },
+
+    // ── Room State ────────────────────────────────────────────
+    // Any authenticated user can read a room (to join/view lobby).
+    // Any authenticated user can write (players update their status).
+    "rooms": {
+      "$roomId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+
+    // ── Match History ─────────────────────────────────────────
+    "matchHistory": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+
+    // ── Leaderboard ───────────────────────────────────────────
+    // Public read so landing page can show it without login.
+    "leaderboard": {
+      ".read": true,
+      ".write": "auth != null"
+    },
+
+    // ── Deny everything else ──────────────────────────────────
+    "$other": {
+      ".read": false,
+      ".write": false
+    }
   }
 }

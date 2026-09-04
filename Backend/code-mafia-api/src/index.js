@@ -30,18 +30,31 @@ function generateToken(username) {
   return `${header}.${payload}.cf-worker-sig`;
 }
 
-function corsHeaders() {
+// Allowed origins for CORS — restrict to app domain + local dev
+const ALLOWED_ORIGINS = [
+  'https://codemafia-54284.web.app',
+  'https://codemafia-54284.firebaseapp.com',
+  'http://localhost:5173',
+  'http://localhost:3000',
+];
+
+function corsHeaders(requestOrigin) {
+  const origin = ALLOWED_ORIGINS.includes(requestOrigin)
+    ? requestOrigin
+    : ALLOWED_ORIGINS[0]; // fallback to production domain
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin',
   };
 }
 
-function json(data, status = 200) {
+function json(data, status = 200, requestOrigin = '') {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders(requestOrigin), 'Content-Type': 'application/json' },
   });
 }
 
@@ -58,10 +71,11 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
+    const requestOrigin = request.headers.get('Origin') || '';
 
     // CORS preflight
     if (method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders() });
+      return new Response(null, { status: 204, headers: corsHeaders(requestOrigin) });
     }
 
     // ─── WebSocket Upgrade & Durable Object Routing ──────────
