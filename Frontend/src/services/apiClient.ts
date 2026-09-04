@@ -74,7 +74,7 @@ export async function apiAuthLogin(data: { usernameOrEmail: string; password?: s
 }
 
 // 4. Sessions: Create
-export async function apiCreateSession(configPayload: { hostName: string; packId: string; playerCount: number; mafiaCount: number }) {
+export async function apiCreateSession(configPayload: { hostName: string; packId: string; playerCount: number; mafiaCount: number; joinCode?: string; sessionId?: string }) {
   return request<{ sessionId: string; joinCode: string }>('/api/v1/sessions', 'POST', configPayload);
 }
 

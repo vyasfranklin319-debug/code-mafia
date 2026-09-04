@@ -550,20 +550,13 @@ export const App: React.FC = () => {
 
     // 3. Worker API integration (non-blocking)
     try {
-      const apiRes = await apiCreateSession({
+      await apiCreateSession({
         hostName: effectiveHost,
         packId: config.packId,
         playerCount: config.playerCount,
-        mafiaCount: config.mafiaCount
+        mafiaCount: config.mafiaCount,
+        joinCode: stableJoinCode
       });
-      if (apiRes && apiRes.joinCode && apiRes.joinCode !== stableJoinCode) {
-        setSession(prev => {
-          if (!prev) return prev;
-          const updated = { ...prev, joinCode: apiRes.joinCode.toUpperCase(), id: apiRes.sessionId || prev.id };
-          saveRoomToRTDB(updated).catch(() => {});
-          return updated;
-        });
-      }
     } catch (e) {
       console.warn('[API Create Session Fallback]:', e);
     }
@@ -713,14 +706,14 @@ export const App: React.FC = () => {
             players: updatedPlayers
           };
         } else {
-          // Room not found — user becomes the host of a new room with this PIN
+          // Room not found in snapshot: connect to the room as a joining player without overwriting the host
           meAsPlayer = {
             id: stableUserId,
             displayName: activeUserName,
             isAlive: true,
-            isHost: true,
+            isHost: false,
             isBot: false,
-            isReady: true,
+            isReady: false,
             avatarColor: 'bg-purple-600',
             stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
           };
@@ -736,11 +729,10 @@ export const App: React.FC = () => {
             passRateThreshold: 100,
             maxRounds: 3
           };
-          targetSession = createInitialSession(defaultConfig, activeUserName, cleanPin);
+          targetSession = createInitialSession(defaultConfig, 'OperativeHost', cleanPin);
           targetSession.joinCode = cleanPin;
-          targetSession.hostName = activeUserName;
+          targetSession.hostName = 'OperativeHost';
           targetSession.players = [meAsPlayer];
-          await saveRoomToRTDB(targetSession);
         }
       }
 

@@ -157,8 +157,8 @@ export default {
     // 4. Create Session
     if (path === '/api/v1/sessions' && method === 'POST') {
       const config = await readBody(request);
-      const sessionId = generateId();
-      const joinCode = generateJoinCode();
+      const sessionId = config.sessionId || generateId();
+      const joinCode = (config.joinCode || generateJoinCode()).toUpperCase();
       const capacity = config.playerCount || 6;
 
       const session = {
@@ -174,7 +174,7 @@ export default {
       sessions.set(sessionId, session);
       sessions.set(joinCode, session);
 
-      return json({ sessionId, joinCode, capacity }, 201);
+      return json({ sessionId, joinCode, capacity }, 201, requestOrigin);
     }
 
     // 5. Get Session

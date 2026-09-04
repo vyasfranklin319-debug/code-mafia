@@ -21,6 +21,7 @@ class CloudflareSocket {
   private playerName: string = 'Operative';
   private handlers = new Map<string, Set<EventHandler>>();
   private queuedMessages: Array<{ event: string; payload: any }> = [];
+  private pendingGetRoomCallbacks = new Map<string, (state: any) => void>();
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1000;
@@ -72,13 +73,41 @@ class CloudflareSocket {
     // Special: getRoom with callback (fetch authoritative state via fast HTTP + WS fallback)
     if (event === 'getRoom' && callback) {
       const queryRoom = targetRoom || this.currentRoomId || 'DEFAULT';
-      this._fetchRoomStateWithTimeout(queryRoom, 2000).then(state => {
-        try { callback(state); } catch (e) {}
+      let called = false;
+      const safeCallback = (state: any) => {
+        if (!called && state) {
+          called = true;
+          this.pendingGetRoomCallbacks.delete(queryRoom);
+          try { callback(state); } catch (e) {}
+        }
+      };
+
+      this.pendingGetRoomCallbacks.set(queryRoom, safeCallback);
+
+      // 1. Fast HTTP probe
+      this._fetchRoomStateWithTimeout(queryRoom, 2500).then(state => {
+        if (state) safeCallback(state);
       });
-      // Also send via WS if open
+
+      // 2. WS message
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ event: 'getRoom', payload: { roomId: queryRoom } }));
+      } else {
+        this.queuedMessages.push({ event: 'getRoom', payload: { roomId: queryRoom } });
+        if (!this.isConnecting) {
+          this._connectToRoom(queryRoom);
+        }
       }
+
+      // 3. Fallback timeout to complete callback
+      setTimeout(() => {
+        if (!called) {
+          called = true;
+          this.pendingGetRoomCallbacks.delete(queryRoom);
+          try { callback(null); } catch (e) {}
+        }
+      }, 2500);
+
       return this;
     }
 
@@ -185,6 +214,10 @@ class CloudflareSocket {
         if (event === 'WS_CONNECTED' || event === 'ROOM_STATE' || event === 'ROOM_UPDATED') {
           const roomState = payload?.roomState || payload;
           if (roomState && this.currentRoomId) {
+            const cb = this.pendingGetRoomCallbacks.get(this.currentRoomId);
+            if (cb) {
+              cb(roomState);
+            }
             this._fire(`roomUpdate:${this.currentRoomId}`, roomState);
           }
           if (event === 'WS_CONNECTED') {
@@ -195,6 +228,11 @@ class CloudflareSocket {
 
         // 2. Exact room update event e.g. "roomUpdate:GKR76K"
         if (event.startsWith('roomUpdate:')) {
+          const roomId = event.replace('roomUpdate:', '');
+          const cb = this.pendingGetRoomCallbacks.get(roomId);
+          if (cb) {
+            cb(payload);
+          }
           this._fire(event, payload);
           return;
         }
