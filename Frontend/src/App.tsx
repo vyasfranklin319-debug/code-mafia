@@ -17,6 +17,17 @@ import { activateMemoryLeak, activateSilentRegression, activateSyntaxMasking } f
 import { initSocketConnection, emitMultiplayerEvent, disconnectSocket } from './services/multiplayerSocket';
 import { apiCreateSession } from './services/apiClient';
 import { syncSessionToFirestore, listenToFirestoreSession } from './services/firebaseStore';
+import {
+  saveRoomToRTDB,
+  joinRoomInRTDB,
+  getRoomFromRTDB,
+  updatePlayerReadyInRTDB,
+  leaveRoomInRTDB,
+  setRoomPhaseInRTDB,
+  syncSessionToRTDB,
+  findGlobalOpenSessionFromRTDB,
+  listenToRoomInRTDB
+} from './services/realtimeSync';
 
 import { Navbar } from './components/Navbar';
 import { DashboardPage } from './pages/DashboardPage';
@@ -187,65 +198,80 @@ export const App: React.FC = () => {
   // The socket room key only depends on the session keys, not on currentUser identity.
   }, [session?.id, session?.joinCode]);
 
-  // Realtime Cloud Firestore Stream Listener (Without re-sync write loop)
-  // Listens on the joinCode (canonical PIN key) since that's what syncSessionToFirestore writes to.
+  // ─── REALTIME DATABASE MULTIPLAYER LISTENER ─────────────────────────────────
+  // Primary multiplayer sync engine: Realtime Database with 0 quota issues,
+  // sub-100ms latency, and automatic presence tracking.
   useEffect(() => {
-    // Prefer joinCode because syncSessionToFirestore writes under BOTH id AND joinCode.
-    // Using joinCode ensures all peers (host + joiners) subscribe to the exact same document.
-    const listenKey = session?.joinCode?.toUpperCase() || session?.id?.toUpperCase();
-    if (!listenKey) return;
+    const joinCode = session?.joinCode?.toUpperCase();
+    if (!joinCode || !currentUser || !session) return;
 
-    const unsubscribe = listenToFirestoreSession(listenKey, (firestoreData) => {
-      if (!firestoreData) return;
+    const unsub = listenToRoomInRTDB(joinCode, ({ meta, players }) => {
+      if (!players || players.length === 0) return;
 
       setSession(prev => {
         if (!prev) return prev;
         let updated = { ...prev };
         let changed = false;
 
-        if (firestoreData.phase && firestoreData.phase !== prev.phase) {
-          updated.phase = firestoreData.phase;
-          setCurrentPhase(firestoreData.phase);
+        // 1. Sync players list
+        if (JSON.stringify(players) !== JSON.stringify(prev.players)) {
+          updated.players = players;
           changed = true;
         }
 
-        if (firestoreData.players && Array.isArray(firestoreData.players)) {
-          // Filter out any bots; preserve isHost from Firestore authoritative state
-          const livePlayers = firestoreData.players.filter((p: any) => !p.isBot);
-          const hostName = firestoreData.hostName || livePlayers.find((p: any) => p.isHost)?.displayName || livePlayers[0]?.displayName;
-          const mergedPlayers = livePlayers.map((fp: any) => ({
-            ...fp,
-            isHost: fp.displayName === hostName,
-            isBot: false
-          }));
-          if (JSON.stringify(mergedPlayers) !== JSON.stringify(prev.players)) {
-            updated.players = mergedPlayers;
-            changed = true;
-          }
+        // 2. Sync phase changes (e.g. host started game or advanced round)
+        if (meta?.phase && meta.phase !== prev.phase) {
+          updated.phase = meta.phase;
+          setCurrentPhase(meta.phase as any);
+          changed = true;
+        }
+
+        // 3. Sync round if updated
+        if (meta?.currentRound && meta.currentRound !== prev.currentRound) {
+          updated.currentRound = meta.currentRound;
+          changed = true;
         }
 
         return changed ? updated : prev;
       });
 
-      // FIX BUG 5: Sync currentUser.isHost AND isReady from Firestore authoritative state
+      // Sync currentUser host and ready flags
       setCurrentUser(prev => {
-        if (!prev || !firestoreData) return prev;
-        const shouldBeHost = firestoreData.hostName
-          ? prev.displayName === firestoreData.hostName
-          : prev.isHost;
-        const myPlayerData = (firestoreData.players || []).find(
-          (p: any) => p.displayName === prev.displayName || p.id === prev.id
-        );
-        const shouldBeReady = myPlayerData ? myPlayerData.isReady : prev.isReady;
-        if (prev.isHost !== shouldBeHost || prev.isReady !== shouldBeReady) {
-          return { ...prev, isHost: shouldBeHost, isReady: shouldBeReady };
+        if (!prev) return prev;
+        const me = players.find(p => p.id === prev.id || p.displayName === prev.displayName);
+        if (!me) return prev;
+        if (me.isHost !== prev.isHost || me.isReady !== prev.isReady) {
+          return { ...prev, isHost: me.isHost, isReady: me.isReady };
         }
         return prev;
       });
     });
 
-    return () => unsubscribe();
-  }, [session?.joinCode, session?.id]);
+    return () => unsub();
+  }, [session?.joinCode]);
+
+  // ─── FIRESTORE PHASE LISTENER (Secondary Backup) ─────────────────────────────
+  useEffect(() => {
+    const listenKey = session?.joinCode?.toUpperCase() || session?.id?.toUpperCase();
+    if (!listenKey || !session || session.phase === 'LOBBY') return;
+
+    try {
+      const unsubscribe = listenToFirestoreSession(listenKey, (firestoreData) => {
+        if (!firestoreData) return;
+        setSession(prev => {
+          if (!prev) return prev;
+          if (firestoreData.phase && firestoreData.phase !== prev.phase) {
+            setCurrentPhase(firestoreData.phase);
+            return { ...prev, phase: firestoreData.phase };
+          }
+          return prev;
+        });
+      });
+      return () => unsubscribe();
+    } catch (e) {
+      console.warn('[Firestore listener skipped]:', e);
+    }
+  }, [session?.joinCode, session?.id, session?.phase]);
 
   // Handler: Create Game (Mode 1: Launch Arena Match)
   const handleCreateGame = async (config: GameConfig, hostName: string) => {
@@ -255,6 +281,26 @@ export const App: React.FC = () => {
     // Pre-generate a 6-character stable PIN
     const stableJoinCode = Math.random().toString(36).substring(2, 8).toUpperCase();
 
+    let stableUserId = localStorage.getItem('code_mafia_user_id');
+    if (!stableUserId) {
+      stableUserId = `usr-${Date.now()}`;
+      localStorage.setItem('code_mafia_user_id', stableUserId);
+    }
+
+    const hostPlayer: Player = {
+      id: stableUserId,
+      displayName: effectiveHost,
+      isAlive: true,
+      isHost: true,
+      isBot: false,
+      isReady: true,
+      avatarColor: 'bg-purple-600',
+      stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+    };
+
+    let chosenCode = stableJoinCode;
+    let sessionId = `sess-${Date.now()}`;
+
     try {
       const apiRes = await apiCreateSession({
         hostName: effectiveHost,
@@ -262,53 +308,33 @@ export const App: React.FC = () => {
         playerCount: config.playerCount,
         mafiaCount: config.mafiaCount
       });
-
-      const chosenCode = (apiRes && apiRes.joinCode) ? apiRes.joinCode.toUpperCase() : stableJoinCode;
-      const newSession = createInitialSession(config, effectiveHost, chosenCode);
-      if (apiRes && apiRes.sessionId) newSession.id = apiRes.sessionId;
-
-      newSession.hostName = effectiveHost;
-      // FIX BUG 4: Persist stable userId so it survives refreshes
-      let stableUserId = localStorage.getItem('code_mafia_user_id');
-      if (!stableUserId) {
-        stableUserId = `usr-${Date.now()}`;
-        localStorage.setItem('code_mafia_user_id', stableUserId);
-      }
-      const hostPlayer: Player = {
-        id: stableUserId,
-        displayName: effectiveHost,
-        isAlive: true,
-        isHost: true,
-        isBot: false,
-        isReady: true,
-        avatarColor: 'bg-purple-600',
-        stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
-      };
-      newSession.players = [hostPlayer];
-
-      setSession(newSession);
-      setCurrentUser(hostPlayer);
-      setCurrentPhase('LOBBY');
-      await syncSessionToFirestore(newSession);
+      if (apiRes && apiRes.joinCode) chosenCode = apiRes.joinCode.toUpperCase();
+      if (apiRes && apiRes.sessionId) sessionId = apiRes.sessionId;
     } catch (e) {
-      const newSession = createInitialSession(config, effectiveHost, stableJoinCode);
-      newSession.hostName = effectiveHost;
-      const hostPlayer: Player = {
-        id: `usr-${Date.now()}`,
-        displayName: effectiveHost,
-        isAlive: true,
-        isHost: true,
-        isBot: false,
-        isReady: true,
-        avatarColor: 'bg-purple-600',
-        stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
-      };
-      newSession.players = [hostPlayer];
+      console.warn('[API Create Session Fallback]:', e);
+    }
 
-      setSession(newSession);
-      setCurrentUser(hostPlayer);
-      setCurrentPhase('LOBBY');
+    const newSession = createInitialSession(config, effectiveHost, chosenCode);
+    newSession.id = sessionId;
+    newSession.hostName = effectiveHost;
+    newSession.players = [hostPlayer];
+
+    setSession(newSession);
+    setCurrentUser(hostPlayer);
+    setCurrentPhase('LOBBY');
+
+    // PRIMARY SYNC: Save entire room (meta + host player) to RTDB
+    try {
+      await saveRoomToRTDB(newSession);
+    } catch (err) {
+      console.warn('[RTDB saveRoom error]:', err);
+    }
+
+    // Secondary: Firestore (safely ignored if quota exceeded)
+    try {
       await syncSessionToFirestore(newSession);
+    } catch (err) {
+      console.warn('[Firestore sync skipped]:', err);
     }
   };
 
@@ -317,36 +343,32 @@ export const App: React.FC = () => {
     const activeUserName = currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
     const cleanPin = pinCode.trim().toUpperCase();
 
+    let stableUserId = localStorage.getItem('code_mafia_user_id');
+    if (!stableUserId) {
+      stableUserId = `usr-${Date.now()}`;
+      localStorage.setItem('code_mafia_user_id', stableUserId);
+    }
+
     try {
-      const { getSessionFromFirestore, syncSessionToFirestore } = await import('./services/firebaseStore');
-      const firestoreDoc = await getSessionFromFirestore(cleanPin);
+      // 1. PRIMARY LOOKUP: Check Realtime Database first (zero quota issues, instant response)
+      const rtdbRoom = await getRoomFromRTDB(cleanPin);
 
       let targetSession: GameSession;
       let meAsPlayer: Player;
 
-      if (firestoreDoc) {
-        // Filter out stale bots from persisted room
-        const existingPlayers: Player[] = (Array.isArray(firestoreDoc.players) ? firestoreDoc.players : [])
-          .filter((p: any) => !p.isBot);
-
-        const hostName = firestoreDoc.hostName
-          || existingPlayers.find((p: any) => p.isHost)?.displayName
-          || existingPlayers[0]?.displayName
-          || activeUserName;
-
-        // Check if this user is already in the room — restore their existing data
-        const existingMe = existingPlayers.find((p: any) => p.displayName === activeUserName);
+      if (rtdbRoom && rtdbRoom.meta) {
+        const existingPlayers: Player[] = rtdbRoom.players || [];
+        const hostName = rtdbRoom.meta.hostName || existingPlayers.find(p => p.isHost)?.displayName || 'OperativeHost';
+        const existingMe = existingPlayers.find(p => p.displayName === activeUserName || p.id === stableUserId);
 
         if (existingMe) {
-          // User is re-joining — preserve their id, ready state, and host flag
           meAsPlayer = { ...existingMe, isHost: existingMe.displayName === hostName };
         } else {
-          // New joiner — create fresh player entry
           meAsPlayer = {
-            id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            id: stableUserId,
             displayName: activeUserName,
             isAlive: true,
-            isHost: false,
+            isHost: activeUserName === hostName,
             isBot: false,
             isReady: false,
             avatarColor: 'bg-purple-600',
@@ -358,7 +380,7 @@ export const App: React.FC = () => {
           ? existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName }))
           : [...existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName })), meAsPlayer];
 
-        const matchConfig: GameConfig = firestoreDoc.config || {
+        const matchConfig: GameConfig = rtdbRoom.meta.config || {
           packId: 'task-master-js',
           playerCount: 6,
           mafiaCount: 2,
@@ -374,55 +396,121 @@ export const App: React.FC = () => {
         const base = createInitialSession(matchConfig, hostName, cleanPin);
         targetSession = {
           ...base,
-          id: firestoreDoc.id || cleanPin,
+          id: rtdbRoom.meta.id || cleanPin,
           joinCode: cleanPin,
-          phase: firestoreDoc.phase || 'LOBBY',
+          phase: (rtdbRoom.meta.phase as any) || 'LOBBY',
           hostName,
           players: updatedPlayers
         };
       } else {
-        // Room not found — user becomes the host of a new room with this PIN
-        meAsPlayer = {
-          id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-          displayName: activeUserName,
-          isAlive: true,
-          isHost: true,
-          isBot: false,
-          isReady: true,
-          avatarColor: 'bg-purple-600',
-          stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
-        };
-        const defaultConfig: GameConfig = {
-          packId: 'task-master-js',
-          playerCount: 6,
-          mafiaCount: 2,
-          workRoundSeconds: 180,
-          discussionSeconds: 90,
-          votingSeconds: 45,
-          transparencyLevel: 'FULL',
-          tieRule: 'NO_ELIMINATION',
-          passRateThreshold: 100,
-          maxRounds: 3
-        };
-        targetSession = createInitialSession(defaultConfig, activeUserName, cleanPin);
-        targetSession.joinCode = cleanPin;
-        targetSession.hostName = activeUserName;
-        targetSession.players = [meAsPlayer];
+        // 2. SECONDARY FALLBACK: Check Cloud Firestore
+        let firestoreDoc: any = null;
+        try {
+          const { getSessionFromFirestore } = await import('./services/firebaseStore');
+          firestoreDoc = await getSessionFromFirestore(cleanPin);
+        } catch (e) {
+          console.warn('[Firestore lookup skipped]:', e);
+        }
+
+        if (firestoreDoc) {
+          const existingPlayers: Player[] = (Array.isArray(firestoreDoc.players) ? firestoreDoc.players : [])
+            .filter((p: any) => !p.isBot);
+          const hostName = firestoreDoc.hostName || existingPlayers.find((p: any) => p.isHost)?.displayName || activeUserName;
+          const existingMe = existingPlayers.find((p: any) => p.displayName === activeUserName);
+
+          if (existingMe) {
+            meAsPlayer = { ...existingMe, isHost: existingMe.displayName === hostName };
+          } else {
+            meAsPlayer = {
+              id: stableUserId,
+              displayName: activeUserName,
+              isAlive: true,
+              isHost: false,
+              isBot: false,
+              isReady: false,
+              avatarColor: 'bg-purple-600',
+              stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+            };
+          }
+
+          const updatedPlayers = existingMe
+            ? existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName }))
+            : [...existingPlayers.map(p => ({ ...p, isHost: p.displayName === hostName })), meAsPlayer];
+
+          const matchConfig: GameConfig = firestoreDoc.config || {
+            packId: 'task-master-js',
+            playerCount: 6,
+            mafiaCount: 2,
+            workRoundSeconds: 180,
+            discussionSeconds: 90,
+            votingSeconds: 45,
+            transparencyLevel: 'FULL',
+            tieRule: 'NO_ELIMINATION',
+            passRateThreshold: 100,
+            maxRounds: 3
+          };
+
+          const base = createInitialSession(matchConfig, hostName, cleanPin);
+          targetSession = {
+            ...base,
+            id: firestoreDoc.id || cleanPin,
+            joinCode: cleanPin,
+            phase: firestoreDoc.phase || 'LOBBY',
+            hostName,
+            players: updatedPlayers
+          };
+        } else {
+          // Room not found — user becomes the host of a new room with this PIN
+          meAsPlayer = {
+            id: stableUserId,
+            displayName: activeUserName,
+            isAlive: true,
+            isHost: true,
+            isBot: false,
+            isReady: true,
+            avatarColor: 'bg-purple-600',
+            stats: { bugsFixed: 0, testsRun: 0, votesCast: 0 }
+          };
+          const defaultConfig: GameConfig = {
+            packId: 'task-master-js',
+            playerCount: 6,
+            mafiaCount: 2,
+            workRoundSeconds: 180,
+            discussionSeconds: 90,
+            votingSeconds: 45,
+            transparencyLevel: 'FULL',
+            tieRule: 'NO_ELIMINATION',
+            passRateThreshold: 100,
+            maxRounds: 3
+          };
+          targetSession = createInitialSession(defaultConfig, activeUserName, cleanPin);
+          targetSession.joinCode = cleanPin;
+          targetSession.hostName = activeUserName;
+          targetSession.players = [meAsPlayer];
+          await saveRoomToRTDB(targetSession);
+        }
       }
 
       setSession(targetSession);
       setCurrentUser(meAsPlayer);
       setCurrentPhase('LOBBY');
 
-      // Only sync to Firestore if user is new to this room (not a re-join)
-      const wasAlreadyInRoom = firestoreDoc && firestoreDoc.players?.some((p: any) => p.displayName === activeUserName);
-      if (!wasAlreadyInRoom) {
+      // Write player presence to RTDB
+      await joinRoomInRTDB(cleanPin, meAsPlayer);
+
+      // Broadcast via socket for low latency
+      emitMultiplayerEvent('PLAYER_JOINED', {
+        roomId: cleanPin,
+        player: meAsPlayer,
+        sessionData: targetSession
+      });
+
+      // Firestore secondary sync (safely ignored if quota exhausted)
+      try {
+        const { syncSessionToFirestore } = await import('./services/firebaseStore');
         await syncSessionToFirestore(targetSession);
-        emitMultiplayerEvent('PLAYER_JOINED', {
-          roomId: cleanPin,
-          player: meAsPlayer,
-          sessionData: targetSession
-        });
+      } catch (err) {
+        console.warn('[Firestore sync skipped]:', err);
       }
     } catch (e) {
       console.warn('[Join PIN Error]:', e);
@@ -434,20 +522,31 @@ export const App: React.FC = () => {
     const activeUserName = currentUser?.displayName || localStorage.getItem('code_mafia_active_user') || 'OperativeUser';
 
     try {
-      // 1. Scan Cloud Firestore for open lobby rooms with available slots
-      const { findGlobalOpenSessionFromFirestore } = await import('./services/firebaseStore');
-      const openRoom = await findGlobalOpenSessionFromFirestore();
-
-      if (openRoom && openRoom.joinCode) {
-        console.log(`[Quick Match] Found open room: ${openRoom.joinCode} (${openRoom.playersCount || openRoom.players?.length || 1}/6 players)`);
-        await handleJoinByPin(openRoom.joinCode);
+      // 1. PRIMARY: Scan Firebase Realtime Database for open lobby rooms
+      const openRtdbRoom = await findGlobalOpenSessionFromRTDB();
+      if (openRtdbRoom && openRtdbRoom.joinCode) {
+        console.log(`[Quick Match] Found open room in RTDB: ${openRtdbRoom.joinCode} (${openRtdbRoom.playersCount} players)`);
+        await handleJoinByPin(openRtdbRoom.joinCode);
         return;
       }
+
+      // 2. SECONDARY: Scan Cloud Firestore
+      try {
+        const { findGlobalOpenSessionFromFirestore } = await import('./services/firebaseStore');
+        const openRoom = await findGlobalOpenSessionFromFirestore();
+        if (openRoom && openRoom.joinCode) {
+          console.log(`[Quick Match] Found open room in Firestore: ${openRoom.joinCode}`);
+          await handleJoinByPin(openRoom.joinCode);
+          return;
+        }
+      } catch (e) {
+        console.warn('[Firestore Quick Match skipped]:', e);
+      }
     } catch (e) {
-      console.warn('[Quick Match] Firestore scan fallback:', e);
+      console.warn('[Quick Match] Scan fallback:', e);
     }
 
-    // 2. No open rooms found — Create a new global arena room and wait for live players
+    // 3. No open rooms found — Create a new global arena room and wait for live players
     console.log('[Quick Match] No open rooms found. Creating new arena room...');
     const defaultConfig: GameConfig = {
       packId: 'task-master-js',
@@ -478,8 +577,17 @@ export const App: React.FC = () => {
     setCurrentUser(updatedUser);
 
     const channelKey = (session.joinCode || session.id).toUpperCase();
+    // PRIMARY SYNC: Update ready state in RTDB — propagates instantly to all peers
+    if (session.joinCode) {
+      await updatePlayerReadyInRTDB(session.joinCode, currentUser.id, newReady);
+    }
+    // Secondary: WebSocket broadcast + Firestore persistence
     emitMultiplayerEvent('PLAYER_READY_TOGGLED', { roomId: channelKey, playerId: currentUser.id, isReady: newReady });
-    await syncSessionToFirestore(updatedSession);
+    try {
+      await syncSessionToFirestore(updatedSession);
+    } catch (e) {
+      console.warn('[Firestore ready sync skipped]:', e);
+    }
   };
 
   // Handler: Start Game
@@ -492,8 +600,19 @@ export const App: React.FC = () => {
     setCurrentPhase('ROLE_REVEAL');
 
     const channelKey = (session.joinCode || session.id).toUpperCase();
+
+    // PRIMARY SYNC: Broadcast phase transition in RTDB
+    if (session.joinCode) {
+      await setRoomPhaseInRTDB(session.joinCode, 'ROLE_REVEAL');
+      await syncSessionToRTDB(sessionWithRoles);
+    }
+
     emitMultiplayerEvent('GAME_STARTED', { roomId: channelKey, phase: 'ROLE_REVEAL', session: sessionWithRoles });
-    await syncSessionToFirestore(sessionWithRoles);
+    try {
+      await syncSessionToFirestore(sessionWithRoles);
+    } catch (e) {
+      console.warn('[Firestore start sync skipped]:', e);
+    }
   };
 
   // Handler: Acknowledge Role -> Start Round 1
@@ -504,8 +623,16 @@ export const App: React.FC = () => {
     setCurrentPhase('WORK_ROUND');
 
     const channelKey = (session.joinCode || session.id).toUpperCase();
+    if (session.joinCode) {
+      await setRoomPhaseInRTDB(session.joinCode, 'WORK_ROUND');
+      await syncSessionToRTDB(workSession);
+    }
     emitMultiplayerEvent('PHASE_ADVANCED', { roomId: channelKey, phase: 'WORK_ROUND', session: workSession });
-    await syncSessionToFirestore(workSession);
+    try {
+      await syncSessionToFirestore(workSession);
+    } catch (e) {
+      console.warn('[Firestore sync skipped]:', e);
+    }
   };
 
   // Handler: Code Edit in Monaco + Git Commit & Replay Telemetry
@@ -805,6 +932,10 @@ export const App: React.FC = () => {
     const discSession = startDiscussion(session);
     setSession(discSession);
     setCurrentPhase('DISCUSSION');
+    if (session.joinCode) {
+      setRoomPhaseInRTDB(session.joinCode, 'DISCUSSION');
+      syncSessionToRTDB(discSession);
+    }
   };
 
   // Handler: Advance to Voting
@@ -813,6 +944,10 @@ export const App: React.FC = () => {
     const votingSession = startVoting(session);
     setSession(votingSession);
     setCurrentPhase('VOTING');
+    if (session.joinCode) {
+      setRoomPhaseInRTDB(session.joinCode, 'VOTING');
+      syncSessionToRTDB(votingSession);
+    }
   };
 
   // Handler: Cast Vote
@@ -848,6 +983,10 @@ export const App: React.FC = () => {
     const elimSession = processElimination(session);
     setSession(elimSession);
     setCurrentPhase(elimSession.phase);
+    if (session.joinCode) {
+      setRoomPhaseInRTDB(session.joinCode, elimSession.phase);
+      syncSessionToRTDB(elimSession);
+    }
   };
 
   // Handler: Continue after Elimination
@@ -855,6 +994,9 @@ export const App: React.FC = () => {
     if (!session) return;
     if (session.phase === 'RESULTS') {
       setCurrentPhase('RESULTS');
+      if (session.joinCode) {
+        setRoomPhaseInRTDB(session.joinCode, 'RESULTS');
+      }
     } else {
       const nextRoundSession: GameSession = {
         ...session,
@@ -863,6 +1005,10 @@ export const App: React.FC = () => {
       const workSession = startWorkRound(nextRoundSession);
       setSession(workSession);
       setCurrentPhase('WORK_ROUND');
+      if (session.joinCode) {
+        setRoomPhaseInRTDB(session.joinCode, 'WORK_ROUND', { currentRound: nextRoundSession.currentRound });
+        syncSessionToRTDB(workSession);
+      }
     }
   };
 
